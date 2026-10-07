@@ -1,0 +1,110 @@
+# Profil config pipeline BOX + SIZE_LABEL + OCR - versi SERVER GPU (lihat scripts/stream_webcam.py).
+# Dipakai oleh: scripts/test_webcam_box.py, scripts/eval_box_manual.py
+# Semua path relatif terhadap folder proyek (medicine_shelf_vision/).
+
+model:
+  # Server hucenrotia-ai (RTX A5000), dijalankan di desktop Remmina untuk dibandingkan dengan laptop.
+  # Model .pt langsung dari folder training (tanpa ekspor), CUDA GPU 0, imgsz sama dengan training.
+  # salinan tetap: train_best.py menimpa runs/best_final/ selama training model berikutnya
+  # kembali ke v3: runs/box_v3s.pt dengan box 0.35 / size_label 0.35; ke v2: runs/box_v2m.pt, 0.4 / 0.3
+  weights: "/home/Zen/Downloads/prelabel_size_label_full/runs/box_v4s.pt"   # v4 (yolo11s, rotasi 180, 144 foto)
+  task: "obb"                      # "obb" = kotak berputar 4 titik; "detect" = kotak lurus
+  imgsz: 1280
+  device: "0"                      # GPU CUDA pertama (RTX A5000)
+  iou: 0.5                         # NMS: dua deteksi dengan IoU > 0.5 dianggap objek yang sama
+  conf:                            # confidence minimum per kelas (out-of-fold CV v4, F1 terbaik)
+    box: 0.35                      # CV v4: P 0.916 R 0.915
+    size_label: 0.45               # CV v4: P 0.935 R 0.926
+  cascade:                         # EKSPERIMENTAL (02-10): model KEDUA dipanggil ulang HANYA pada kotak
+                                    #   kandidat untuk OBB & size_label lebih presisi (src/box_cascade.py).
+                                    #   Di server GPU sudah cepat tiap frame; ini lebih untuk uji banding
+                                    #   akurasi daripada FPS (beda dengan laptop, yang model utamanya dibikin kecil).
+    enabled: false
+    weights: "/home/Zen/Downloads/prelabel_size_label_full/runs/box_v4s.pt"   # samakan dengan weights: di atas
+    imgsz: 1280
+    device: "0"
+    pad_frac: 0.25
+
+classes:                           # nama kelas DI MODEL -> nama baku di kode
+  box: "box"
+  size_label: "size_label"
+
+grouping:
+  min_label_overlap: 0.5           # size_label hanya milik box yang memuat pusatnya / >= 50 % luasnya (label di
+                                   #   luar box = label kotak sebelah, tidak pernah dipasangkan ke box terdekat)
+
+ocr:
+  engine: "rapidocr"               # "rapidocr" (disarankan, CPU) atau "tesseract"
+  min_confidence: 0.90             # token OCR di bawah ini dianggap ragu; 0.90 = 0 bacaan yakin salah pada 123 kotak dataset
+  retry_flip_below: 0.80           # dua arah baca masih ragu -> coba arah ketiga (90 derajat kanan)
+  min_crop_height: 48              # sisi terpendek crop minimal 48 px (diperbesar dulu kalau kurang)
+  every_n_frames: 15               # tiap box dibaca ulang paling cepat tiap 15 frame (stream 15 fps = tiap 1 detik)
+  every_n_frames_candidate: 5      # kotak AMBIL / kandidat dibaca ulang tiap 5 frame (bukti keduanya yang ditunggu)
+  max_crops_per_frame: 4           # server: CPU kuat, lebih banyak kotak dibaca per frame
+  workers: 3                       # 3 thread OCR paralel (tiap thread mesin OCR sendiri); laptop 1
+  threads: 0                       # core CPU per mesin OCR; 0 = otomatis (jumlah core / workers)
+  device: "cpu"                    # uji 01-10 10:38: "cuda" dengan workers 3 (3 sesi GPU sekaligus) CRASH
+                                   #   ("terminate called without an active exception" / core dumped) setelah 93 s,
+                                   #   dan OCR-nya pun tidak lebih cepat dari CPU laptop (639 ms/kotak). Deteksi
+                                   #   (bukan OCR) tetap di GPU lewat model.device - itu yang terbukti cepat
+                                   #   (21,6 ms/frame). Kalau mau coba lagi "cuda" untuk OCR: turunkan workers ke 1
+                                   #   dulu (satu sesi GPU, bukan tiga bersamaan), uji panjang sebelum dipakai live.
+  max_motion_px: 6                 # kamera bergerak > 6 px per 1/30 detik (waktu sebenarnya) = buram gerak -> tidak di-OCR
+  max_lost_frames: 10              # gerakan kamera tak terukur > 10 frame berturut-turut -> semua nomor kotak dilupakan
+
+matching:
+  history: 5                       # simpan 5 bacaan terakhir per box
+  require_consistent: 2            # butuh 2 bacaan berturut-turut yang sama sebelum hijau
+  diameter_range_mm: [1.0, 10.0]
+  length_range_mm: [6, 60]         # stent / balon <= 48 mm; "L 29" terbaca "129" tidak lagi dianggap panjang 129
+
+selection:                         # alur penyeleksi satu permintaan (src/box_session.py)
+  count_s: 1.5                     # jumlah kotak di rak = median hitungan selama 1,5 detik kamera diam
+  empty_s: 2.0                     # 0 kotak selama 2 detik kamera diam -> RAK KOSONG, pencarian tidak dilanjutkan
+  gone_s: 2.0                      # kotak AMBIL hilang + slotnya kosong & diam 2 detik (slot terlihat, kamera diam)
+                                   #   -> TERAMBIL, slot kosong terverifikasi
+  recheck_s: 5.0                   # slot yang baru kosong masih diawasi 5 detik (terisi lagi -> peringatan)
+  expected_count: 0                # jumlah kotak di rak kalau diketahui dari inventori (0 = tidak diketahui);
+                                   #   terdeteksi lebih sedikit -> TIDAK ADA tidak pernah disimpulkan
+
+verify:                            # verifikasi kotak yang diminta (src/box_verifier.decide_multi)
+  catalog_csv: "data/gtin_catalog.csv"   # GTIN -> produk + ukuran; hanya baris verified = 1 yang dipakai
+  min_score: 2                     # MATCH butuh >= 2 poin bukti yang cocok dan tidak ada yang bertentangan:
+                                   #   barcode GS1 (GTIN di katalog terverifikasi) = 2, teks ukuran = 1,
+                                   #   kode REF berisi ukuran = 1, GTIN dari teks OCR = 1
+  trust_unverified_catalog: false  # JANGAN diubah untuk pemakaian nyata
+  min_box_width_px: 24             # punggung lebih sempit dari ini di gambar = terlalu jauh untuk dibaca
+  ocr_full_box: true               # bukti belum cukup -> baca juga seluruh punggung (REF, teks GTIN)
+  full_box_min_width_px: 40        # ... hanya kalau punggung selebar ini (cukup dekat)
+
+# Daftar tetap nama produk (huruf kecil). OCR yang salah 1-2 huruf tetap dicocokkan
+# ke entri terdekat; teks yang tidak mirip entri mana pun = produk tidak terbaca.
+# TAMBAH / KOREKSI sesuai kotak sampel asli di lab.
+catalog:
+  - "angiolite"
+  - "xperience pro"
+  - "essential pro"
+  - "accuforce"
+  - "ultimaster nagomi"
+  - "ryurei"
+  - "conqueror nc pro"
+  - "nc emerge"
+  - "agent"
+  - "sapphire"
+  - "scoreflex"
+  - "permanent sled bag"
+
+camera:                           # dipakai HANYA kalau webcam dicolok LANGSUNG ke server (bukan lewat
+                                   # stream_webcam.py+tunnel laptop); belum pernah dicoba di server Linux ini.
+  index: "auto"                   # "auto" = kamera resolusi terbesar; backend "any" WAJIB di Linux -- "msmf"
+  width: 1920                     # (bawaan kalau backend tidak diisi) itu backend Windows, tidak ada di Ubuntu
+  height: 1080
+  fps: 30
+  backend: "any"                  # cv2.CAP_ANY -> OpenCV pilih sendiri (V4L2 di Linux)
+
+output:
+  view_width: 1280                 # jendela tampilan diperkecil ke lebar 1280 supaya lancar lewat Remmina (RDP);
+                                   #   deteksi / OCR / simpanan tetap resolusi penuh. 0 = ukuran asli
+  screens_dir: "results/screens"
+  log_csv: "results/selection_log.csv"
+  verify_log_csv: "results/verify_log.csv"   # log audit MATCH / KEDALUWARSA / AMBIL

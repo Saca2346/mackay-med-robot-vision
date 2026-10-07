@@ -1,0 +1,107 @@
+# Profil config pipeline BOX + SIZE_LABEL + OCR (domain kotak stent / balon di lab).
+# Dipakai oleh: scripts/test_webcam_box.py, scripts/eval_box_manual.py
+# Semua path relatif terhadap folder proyek (medicine_shelf_vision/).
+
+model:
+  # Model v4 (server runs/box_v4s.pt = models/box_v4s.pt): yolo11s-obb, augmentasi rotasi +-180 (kotak tiduran),
+  # 144 foto berlabel (90 lama + 54 sesi 28/9), dipilih lewat 5-fold CV (tools/train_best.py, 2026-09-29),
+  # diekspor ke OpenVINO untuk iGPU Intel UHD. Diukur di laptop ini (i3-1115G4), frame webcam 1920x1080, 960:
+  #   v4s OpenVINO gpu.0 53 ms (19 FPS)   v2m OpenVINO gpu.0 128 ms (8 FPS)   v4s .pt cpu 257 ms
+  #   OpenVINO gpu.1 (MX350) 1-2 detik -> jangan dipakai
+  # Webcam 1080p butuh teks lebih tajam: --weights models/box_v4s_1280_openvino_model --imgsz 736,1280
+  # Foto (tegak, 3072x4080) atau model .pt: --weights models/box_v4s.pt (imgsz jadi 1280, device cpu).
+  # Kembali ke v2: weights models/box_v2m_960_openvino_model, conf box 0.4 / size_label 0.3.
+  weights: "models/box_v4s_960_openvino_model"
+  task: "obb"                      # "obb" = kotak berputar 4 titik; "detect" = kotak lurus
+  imgsz: [544, 960]                # [tinggi, lebar]; model OpenVINO ukurannya tetap = saat ekspor
+  device: "intel:gpu.0"            # OpenVINO di iGPU Intel; "intel:cpu" kalau driver GPU bermasalah
+  iou: 0.5                         # NMS: dua deteksi dengan IoU > 0.5 dianggap objek yang sama
+  conf:                            # confidence minimum per kelas (out-of-fold CV v4, F1 terbaik)
+    box: 0.35                      #   P 0.916 R 0.915 (CV v4 mAP50-95 0.696 +- 0.044, mirip webcam 0.687)
+    size_label: 0.45               #   P 0.935 R 0.926
+  cascade:                         # EKSPERIMENTAL (02-10): model KEDUA, dipanggil ulang HANYA pada kotak
+                                    #   kandidat (pick / CANDIDATE / hint inventaris tinggi) untuk OBB &
+                                    #   size_label lebih presisi, tanpa menaikkan biaya tiap frame.
+                                    #   Lihat src/box_cascade.py. Model di atas tetap jalan tiap frame seperti biasa.
+    enabled: false
+    weights: "models/box_v4s.pt"   #   model besar; di laptop pakai .pt (device cpu) -- OpenVINO untuk ukuran tetap,
+                                    #   tidak cocok untuk crop kandidat yang ukurannya berubah-ubah
+    imgsz: 1280
+    device: "cpu"
+    pad_frac: 0.25                 #   konteks tambahan di sekeliling kotak kandidat (fraksi lebar/tinggi kotak)
+
+classes:                           # nama kelas DI MODEL -> nama baku di kode
+  box: "box"
+  size_label: "size_label"
+
+grouping:
+  min_label_overlap: 0.5           # size_label hanya milik box yang memuat pusatnya / >= 50 % luasnya (label di
+                                   #   luar box = label kotak sebelah, tidak pernah dipasangkan ke box terdekat)
+
+ocr:
+  engine: "rapidocr"               # "rapidocr" (disarankan, CPU) atau "tesseract"
+  min_confidence: 0.90             # token OCR di bawah ini dianggap ragu; 0.90 = 0 bacaan yakin salah pada 123 kotak dataset
+  retry_flip_below: 0.80           # dua arah baca masih ragu -> coba arah ketiga (90 derajat kanan)
+  min_crop_height: 48              # sisi terpendek crop minimal 48 px (diperbesar dulu kalau kurang)
+  every_n_frames: 15               # tiap box dibaca ulang paling cepat tiap 15 frame
+  every_n_frames_candidate: 5      # kotak AMBIL / kandidat dibaca ulang tiap 5 frame (bukti keduanya yang ditunggu)
+  max_crops_per_frame: 2           # batasi OCR per frame supaya video tetap lancar
+  max_motion_px: 6                 # kamera bergerak > 6 px per 1/30 detik (waktu sebenarnya) = buram gerak -> tidak di-OCR
+  threads: 2                       # OCR 2 thread: sisa CPU untuk deteksi (terukur: deteksi 153 -> 83 ms, OCR 338 -> 195 ms per kotak)
+  max_lost_frames: 10              # gerakan kamera tak terukur > 10 frame berturut-turut -> semua nomor kotak dilupakan
+
+matching:
+  history: 5                       # simpan 5 bacaan terakhir per box
+  require_consistent: 2            # butuh 2 bacaan berturut-turut yang sama sebelum hijau
+  diameter_range_mm: [1.0, 10.0]
+  length_range_mm: [6, 60]         # stent / balon <= 48 mm; "L 29" terbaca "129" tidak lagi dianggap panjang 129
+
+selection:                         # alur penyeleksi satu permintaan (src/box_session.py)
+  count_s: 1.5                     # jumlah kotak di rak = median hitungan selama 1,5 detik kamera diam
+  empty_s: 2.0                     # 0 kotak selama 2 detik kamera diam -> RAK KOSONG, pencarian tidak dilanjutkan
+  gone_s: 2.0                      # kotak AMBIL hilang + slotnya kosong & diam 2 detik (slot terlihat, kamera diam)
+                                   #   -> TERAMBIL, slot kosong terverifikasi
+  recheck_s: 5.0                   # slot yang baru kosong masih diawasi 5 detik (terisi lagi -> peringatan)
+  expected_count: 0                # jumlah kotak di rak kalau diketahui dari inventori (0 = tidak diketahui);
+                                   #   terdeteksi lebih sedikit -> TIDAK ADA tidak pernah disimpulkan
+
+verify:                            # verifikasi kotak yang diminta (src/box_verifier.decide_multi)
+  catalog_csv: "data/gtin_catalog.csv"   # GTIN -> produk + ukuran; hanya baris verified = 1 yang dipakai
+  min_score: 2                     # MATCH butuh >= 2 poin bukti yang cocok dan tidak ada yang bertentangan:
+                                   #   barcode GS1 (GTIN di katalog terverifikasi) = 2, teks ukuran = 1,
+                                   #   kode REF berisi ukuran = 1, GTIN dari teks OCR = 1
+  trust_unverified_catalog: false  # JANGAN diubah untuk pemakaian nyata
+  min_box_width_px: 24             # punggung lebih sempit dari ini di gambar = terlalu jauh untuk dibaca
+  ocr_full_box: true               # bukti belum cukup -> baca juga seluruh punggung (REF, teks GTIN)
+  full_box_min_width_px: 40        # ... hanya kalau punggung selebar ini (cukup dekat)
+
+# Daftar tetap nama produk (huruf kecil). OCR yang salah 1-2 huruf tetap dicocokkan
+# ke entri terdekat; teks yang tidak mirip entri mana pun = produk tidak terbaca.
+# TAMBAH / KOREKSI sesuai kotak sampel asli di lab.
+catalog:
+  - "angiolite"
+  - "xperience pro"
+  - "essential pro"
+  - "accuforce"
+  - "ultimaster nagomi"
+  - "ryurei"
+  - "conqueror nc pro"
+  - "nc emerge"
+  - "agent"
+  - "sapphire"
+  - "scoreflex"
+  - "permanent sled bag"
+
+camera:                            # webcam eksternal HP w300 (USB): 1920x1080 30 fps, fokus tetap
+  index: "auto"                    # "auto" = kamera dengan resolusi terbesar (w300; kamera laptop cuma 640x480),
+                                   # atau nomor tetap: 0 = w300, 1 = kamera laptop (urutan bisa berubah)
+  width: 1920
+  height: 1080
+  fps: 30
+  backend: "msmf"                  # msmf = 30 fps; dshow cuma 20 fps di w300
+  fourcc: "MJPG"                   # tanpa MJPG, 1080p lewat USB jatuh ke fps rendah
+output:
+  view_width: 0                    # lebar jendela tampilan (0 = ukuran asli); lewat Remmina pakai 1280
+  screens_dir: "results/screens"
+  log_csv: "results/selection_log.csv"
+  verify_log_csv: "results/verify_log.csv"   # log audit MATCH / KEDALUWARSA / AMBIL

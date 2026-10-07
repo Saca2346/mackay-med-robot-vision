@@ -1,0 +1,25 @@
+# lingkungan dan cache
+venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# hasil uji, rekaman, log (besar)
+results/
+
+# model dan bobot (besar; sudah ada di server)
+models/
+*.pt
+*.onnx
+*.engine
+
+# data rumah sakit: foto punggung kotak, bukti GTIN, inventaris asli
+data/rak/punggung/
+data/rak/inventaris*.csv
+data/rak/*.jpg
+data/gtin_evidence/
+
+# berkas sementara
+*.tmp
+*.zip
+*.mp4

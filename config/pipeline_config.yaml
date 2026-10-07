@@ -1,0 +1,65 @@
+# Central config for the medicine shelf vision pipeline.
+# Mirrors the architecture in "Vision System Design: Medicine Shelf Robot on Lenovo V14 G2 ITL"
+# (sections 2, 3, 5, 6, 8).
+
+model:
+  onnx_path: "models/yolo26n.onnx"  # diganti dari yolo11n -- diuji lebih cepat & sedikit lebih akurat, lihat scripts/export_model.py
+  input_size: 640          # drop to 416 for more FPS at some accuracy cost (see section 9)
+  conf_threshold: 0.35
+  iou_threshold: 0.45
+  # Execution provider preference order. On the Lenovo+MX350 with CUDA 12.6/12.8 +
+  # onnxruntime-gpu installed, CUDAExecutionProvider will be picked automatically.
+  # In this sandbox (no GPU), it falls back to CPUExecutionProvider.
+  providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+camera:
+  # "webcam" | "video_file" | "synthetic"
+  # synthetic = generated test shelf images (data/test_assets), used when no camera is present.
+  source: "synthetic"
+  device_index: 0
+  video_path: "data/test_assets/synthetic_shelf.mp4"
+  synthetic_dir: "data/test_assets"
+  width: 1280
+  height: 720
+
+verification:
+  ocr_lang: "eng"
+  ocr_min_confidence: 40      # pytesseract confidence 0-100; below this, fall back to color+shape only
+  color_hist_bins: 16
+  shape_match_threshold: 0.25 # cv2.matchShapes score; lower = more similar
+
+database:
+  path: "data/medicine_db.sqlite"
+
+depth:
+  # "realsense" | "mock"
+  # mock synthesizes a plausible depth value from bounding-box size (for pipeline testing
+  # without hardware). Use "realsense" on the real laptop with a D435i/D415 connected.
+  source: "mock"
+  # RealSense D435i approximate intrinsics at 640x480 (placeholder — replace with the
+  # camera's actual factory intrinsics, read at runtime via pyrealsense2 when available)
+  fx: 615.0
+  fy: 615.0
+  cx: 320.0
+  cy: 240.0
+
+two_stage:
+  enabled: false   # Phase 3 here is single-camera; enable once the wrist camera (section 7) is wired up
+
+shelf:
+  # Multi-tier shelf search: given a target SKU (e.g. "MED-001" / paracetamol),
+  # scan the whole shelf (wide camera, possibly from a distance -> lower accuracy
+  # is expected and acceptable here) and report WHICH TIER it's on, so the arm
+  # can move to that tier before Stage 2 (wrist camera) does the close-up,
+  # high-confidence re-check. Picking/grasping itself is a separate task.
+  tiers: 4
+  # tier_bounds: null -> split the frame into `tiers` equal horizontal bands.
+  # Once you calibrate against your REAL physical shelf, set this explicitly as
+  # ratios of frame height, e.g. for a 4-tier shelf where tier boundaries in the
+  # wide-camera frame are known from measurement:
+  #   tier_bounds: [[0.0, 0.22], [0.22, 0.48], [0.48, 0.74], [0.74, 1.0]]
+  tier_bounds: null
+  # a match on a tier counts as "found" even at lower confidence than the
+  # in-doc verification defaults, because Stage 2 (wrist camera) will confirm
+  # it up close before anything is picked — see section 7.
+  accept_color_shape_matches: true

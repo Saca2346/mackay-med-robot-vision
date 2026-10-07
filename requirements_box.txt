@@ -1,0 +1,8 @@
+# Tambahan untuk pipeline box + size_label + OCR, di atas requirements.txt yang sudah ada
+# (ultralytics, onnxruntime, opencv-python, numpy, pyyaml sudah ada di sana).
+rapidocr>=3.0                 # OCR PP-OCR (model PaddleOCR versi ONNX), CPU. rapidocr-onnxruntime (paket lama)
+                              # hanya ada untuk Python < 3.13; src/box_ocr.py bisa memakai keduanya
+onnxruntime>=1.17            # mesin OCR rapidocr (server trse_venv belum punya: pip install onnxruntime)
+zxing-cpp>=2.2                # barcode GS1 (GTIN, kedaluwarsa, LOT); tanpa ini verifikasi jalan tanpa barcode
+openvino>=2024.0              # laptop saja: model OpenVINO di iGPU Intel (sekitar 10 FPS vs 2 FPS .pt di CPU)
+pytest>=8                     # untuk tests/test_box_*.py

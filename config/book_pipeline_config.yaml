@@ -1,0 +1,77 @@
+# Profil config untuk domain BARU: deteksi buku & lokasi tingkat rak buku ("rak buku").
+#
+# Ditambahkan agar sejalan dengan foto rak nyata di "Overall Progress NSTC - Mackay" (Hucenrotia
+# Lab/NYCU): rak farmasi mereka berisi kemasan tipis berdiri berjajar rapat -- secara visual
+# PERSIS seperti buku berdiri di rak buku (punggung/spine menghadap kamera), dan itu justru
+# kategori yang mereka tandai sebagai "Non-Box Workpieces" / "Uncertain Positioning" -- salah
+# satu titik lemah model mereka saat ini. Config ini membuktikan arsitektur proyek ini (YOLO26n
+# ONNX + tier-scan) TIDAK khusus obat -- bisa dipakai untuk objek berjajar tegak apa pun,
+# termasuk buku, tanpa mengubah satu baris pun kode di src/ atau scripts/.
+#
+# Cara pakai (persis sama seperti domain obat, cuma tunjuk config lain):
+#   python scripts/test_webcam.py --config config/book_pipeline_config.yaml
+#   python scripts/run_shelf_search.py --config config/book_pipeline_config.yaml --target BUKU-001 --live --image foto_rak_buku.jpg
+#
+# LEVEL 0 (jalan HARI INI, tanpa training apa pun): model placeholder yang sudah ada
+# (models/yolo26n.onnx) adalah YOLO26n COCO-pretrained, dan "book" SUDAH JADI SALAH SATU
+# dari 80 kelas COCO bawaannya (lihat src/pipeline.py, COCO_CLASSES). Artinya perintah di atas
+# SUDAH bisa mendeteksi buku generik sekarang juga -- lihat docs/DATASET_SOURCES_BUKU.md bagian
+# "Level 0" untuk buktinya. model.onnx_path di bawah sengaja masih menunjuk ke model COCO yang
+# sama; ganti ke models/book_yolo26n.onnx (Level 1) hanya setelah Anda melatih model khusus buku
+# sendiri (docs/DATASET_SOURCES_BUKU.md + notebooks/train_book_on_kaggle.ipynb).
+
+model:
+  onnx_path: "models/yolo26n.onnx"   # Level 0: COCO-pretrained, kelas "book" sudah tersedia.
+                                      # Level 1: ganti ke "models/book_yolo26n.onnx" setelah training
+                                      # (lihat notebooks/train_book_on_kaggle.ipynb), dan pakai
+                                      # --classes data/book_classes.txt di scripts/test_webcam.py.
+  input_size: 640
+  conf_threshold: 0.35
+  iou_threshold: 0.45
+  providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+camera:
+  source: "synthetic"     # ganti "webcam" di laptop asli, sama seperti domain obat
+  device_index: 0
+  video_path: "data/test_assets/synthetic_shelf.mp4"
+  synthetic_dir: "data/test_assets"
+  width: 1280
+  height: 720
+
+verification:
+  # OCR/warna/bentuk di sini OPSIONAL untuk domain buku -- beda dengan obat, salah pilih
+  # buku bukan risiko keselamatan, jadi verifikasi hybrid ini hanya berguna KALAU Anda benar-
+  # benar ingin mencari judul buku tertentu di rak (analog mencari SKU obat tertentu). Kalau
+  # tujuan Anda cuma "deteksi + hitung buku di tiap tingkat rak" (bukan cari judul spesifik),
+  # bagian ini bisa diabaikan -- scripts/test_webcam.py tidak memakainya sama sekali.
+  ocr_lang: "eng"          # ganti "ind" kalau judul buku Anda didominasi teks Bahasa Indonesia
+  ocr_min_confidence: 40
+  color_hist_bins: 16
+  shape_match_threshold: 0.25
+
+database:
+  # Katalog opsional (analog medicine_db.sqlite) -- HANYA perlu diisi kalau Anda ingin mencari
+  # judul buku tertentu (lihat scripts/init_db.py sebagai contoh; buat versi "init_book_db.py"
+  # serupa kalau dibutuhkan). Kosong = run_shelf_search.py tetap jalan, hanya saja tidak akan
+  # menemukan match "judul dikenal" (match_kind akan selalu "no_match").
+  path: "data/book_db.sqlite"
+
+depth:
+  source: "mock"
+  fx: 615.0
+  fy: 615.0
+  cx: 320.0
+  cy: 240.0
+
+two_stage:
+  enabled: false
+
+shelf:
+  # "rak buku" (bookshelf) TIDAK dijadikan kelas deteksi tersendiri -- sama seperti rak obat,
+  # rak diperlakukan sebagai GEOMETRI bingkai kamera (dibagi per tingkat), bukan objek yang
+  # dideteksi YOLO. Ini bukan keterbatasan; ini pilihan desain yang sudah terbukti benar di
+  # domain obat (lihat src/shelf_scanner.py, tests/test_shelf_scanner.py) dan berlaku sama
+  # persis untuk rak buku: cukup ganti jumlah/posisi tingkat sesuai rak buku fisik Anda.
+  tiers: 4
+  tier_bounds: null
+  accept_color_shape_matches: true

@@ -1,0 +1,31 @@
+# Medicine Shelf Vision System — dependencies
+# Designed for: Lenovo V14 G2 ITL (Intel 11th Gen, 8GB RAM, NVIDIA MX350 2GB, Ubuntu 22.04)
+# See design_notes.md / the project doc for why these versions are pinned.
+#
+# IMPORTANT (on the real laptop, for GPU inference):
+#   MX350 is Pascal (compute capability 6.1). Recent CUDA/PyTorch builds have
+#   dropped Pascal support. Pin accordingly:
+#     - CUDA 12.6 or 12.8 (NOT 13.x)
+#     - onnxruntime-gpu built against a CUDA 12.x toolkit
+#     - PyTorch <= 2.7.x is ONLY needed if you train locally (not needed for
+#       inference-only deployment, since we ship ONNX + onnxruntime).
+#
+# In THIS sandbox (no NVIDIA GPU), onnxruntime (CPU build) is used instead of
+# onnxruntime-gpu, and everything still runs end-to-end on synthetic test data.
+
+ultralytics>=8.4.0        # >=8.4.0 dibutuhkan untuk YOLO26 (dipakai sebagai default detector sekarang);
+                          # rilis 8.3.x tidak mengenali yolo26n.pt
+onnxruntime==1.19.*        # CPU build for this sandbox / dev machines without an NVIDIA GPU
+# onnxruntime-gpu==1.19.*  # <-- use this instead, on the Lenovo+MX350, with CUDA 12.6/12.8 installed
+opencv-python==4.10.*      # NOT opencv-python-headless: test_webcam.py opens a live GUI window
+                           # (cv2.imshow) to let you SEE detections on your real camera feed;
+                           # headless builds have no GUI backend compiled in and cv2.imshow will
+                           # fail on them. Switch to opencv-python-headless only for a later
+                           # headless/embedded deployment (no display attached) that never calls imshow.
+numpy<2.0
+pytesseract==0.3.*
+Pillow>=10.0
+pyyaml>=6.0
+
+# Optional, only needed for Phase 3 on real RGB-D hardware (Intel RealSense D435i/D415):
+# pyrealsense2==2.55.*     # not installed in this sandbox; depth_estimator.py falls back to a mock depth source when absent
