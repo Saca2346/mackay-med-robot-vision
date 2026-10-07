@@ -68,7 +68,7 @@ def main() -> None:
     ap.add_argument("--kamera", action="store_true",
                     help="status SIAP -> lanjut ke verifikasi kamera (test_webcam_box.py)")
     ap.add_argument("--kamera-arg", nargs=argparse.REMAINDER, default=[],
-                    help="argumen tambahan untuk test_webcam_box.py, taruh PALING AKHIR, mis. --config config/box_pipeline_config_server.yaml --source http://127.0.0.1:18090/video")
+                    help="argumen tambahan untuk test_webcam_box.py, taruh PALING AKHIR, mis. --config config/box_pipeline_config_server.yaml --source http://127.0.0.1:18090/video.mjpg")
     ap.add_argument("--json", action="store_true", help="cetak hanya pesan TM (JSON satu baris)")
     args = ap.parse_args()
 

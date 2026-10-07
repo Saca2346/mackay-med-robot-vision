@@ -32,7 +32,7 @@ PATTERNS = [
     "config/box_pipeline_config.yaml", "config/box_pipeline_config_server.yaml",
     "data/box_classes.txt", "data/verify_eval_gt.csv", "data/gtin_evidence/*.jpg",
     "data/rak/inventaris.csv", "data/rak/posisi.csv", "data/rak/punggung/*.jpg",
-    "requirements_box.txt", "docs/BOX_PIPELINE.md", "docs/CHECKLIST_DEMO.md", "UJI_ROBOT_LAPTOP.bat",
+    "requirements_box.txt", "docs/BOX_PIPELINE.md", "docs/CHECKLIST_DEMO.md", "docs/UJI_LIVE_SERVER.md","UJI_ROBOT_LAPTOP.bat",
 ]
 SUMS = "paket_sha256.txt"
 

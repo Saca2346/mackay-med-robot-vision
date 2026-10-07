@@ -36,7 +36,7 @@ Terakhir diperbarui: 07-10.
 - [ ] Kirim paket ke server, cek sha256, lalu jalankan `pytest` di server. Harus 205 lulus.
 - [ ] Gladi demo lewat Remmina, lalu rekam layarnya sebagai cadangan.
 - [x] Mode kamera di program demo: `--kamera` meneruskan status SIAP ke `test_webcam_box.py` (diuji sampai skrip kamera terbuka; belum dengan kamera/stream asli).
-- [ ] Uji mode kamera sungguhan: laptop `stream_webcam.py` + tunnel, server `demo_request.py --sekali "angiolite 2.5 x 29" --kamera --kamera-arg --config config/box_pipeline_config_server.yaml --source http://127.0.0.1:18090/video` (cek nama opsi `--source` di BOX_PIPELINE.md).
+- [ ] Uji mode kamera sungguhan: laptop `stream_webcam.py` + tunnel, server `demo_request.py --sekali "angiolite 2.5 x 29" --kamera --kamera-arg --config config/box_pipeline_config_server.yaml --source http://127.0.0.1:18090/video.mjpg`. Langkah lengkapnya ada di `docs/UJI_LIVE_SERVER.md` (Tahap 0-7).
 - [ ] Laporan Jumat: tangkapan layar demo, tabel status, dan pertanyaan untuk tim.
 - [ ] Ganti `posisi.csv` contoh dengan data rak/level dari tim.
 
