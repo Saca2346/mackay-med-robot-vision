@@ -5,9 +5,9 @@
 model:
   # Server hucenrotia-ai (RTX A5000), dijalankan di desktop Remmina untuk dibandingkan dengan laptop.
   # Model .pt langsung dari folder training (tanpa ekspor), CUDA GPU 0, imgsz sama dengan training.
-  # salinan tetap: train_best.py menimpa runs/best_final/ selama training model berikutnya
+  # model: models/box_v4s.pt di folder proyek (kirim dengan scp; .pt tidak ada di GitHub). Salinan training lama: runs/box_v4s.pt
   # kembali ke v3: runs/box_v3s.pt dengan box 0.35 / size_label 0.35; ke v2: runs/box_v2m.pt, 0.4 / 0.3
-  weights: "/home/Zen/Downloads/prelabel_size_label_full/runs/box_v4s.pt"   # v4 (yolo11s, rotasi 180, 144 foto)
+  weights: "models/box_v4s.pt"   # v4 (yolo11s, rotasi 180, 144 foto)
   task: "obb"                      # "obb" = kotak berputar 4 titik; "detect" = kotak lurus
   imgsz: 1280
   device: "0"                      # GPU CUDA pertama (RTX A5000)
@@ -20,7 +20,7 @@ model:
                                     #   Di server GPU sudah cepat tiap frame; ini lebih untuk uji banding
                                     #   akurasi daripada FPS (beda dengan laptop, yang model utamanya dibikin kecil).
     enabled: false
-    weights: "/home/Zen/Downloads/prelabel_size_label_full/runs/box_v4s.pt"   # samakan dengan weights: di atas
+    weights: "models/box_v4s.pt"   # samakan dengan weights: di atas
     imgsz: 1280
     device: "0"
     pad_frac: 0.25
