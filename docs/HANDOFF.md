@@ -31,9 +31,9 @@ Newest entry first. One entry per finished piece of work: date, who, what change
   Checked with a fresh read-only manifest: 640 of 644 files identical, expiry status 51 / 145 on both sides, the 33 photos
   sha1-identical. Remaining differences are docs only (server keeps 3 Indonesian guides at the root; the laptop root
   `PANDUAN_TRAINING_3KELAS.md` has a newer "Status 11-10" section). From now on edit labels on the server only.
-* Push: `code` branch `claude/sync-20261014` is on GitHub (PR not opened). `labeling` push failed: the remote
-  `Saca2346/mackay-med-robot-vision-` does not exist (the account has no labelling repo at all, checked 14 Oct); owner to create
-  one (private, empty) and give the URL.
+* Push: branch `claude/sync-20261014` is on GitHub in both repos (PRs not opened). The old labelling remote
+  `Saca2346/mackay-med-robot-vision-` never existed; the owner created `Saca2346/mackay-med-robot-vision-labeling` (private),
+  now `origin` of `labeling\`, with `main` (first commit) and the branch pushed. History checked: code and docs only (72 files).
 * Missing locally, not needed by the box pipeline: `data/test_assets/synthetic_shelf.mp4` (`scripts/generate_test_assets.py`),
   `data/book_db.sqlite`. The 3-class model and v5/v6 are only on the server.
 * Commit: all work since 8 Oct committed on branch `claude/sync-20261014` in both repos (not pushed). The labelling repo got a
