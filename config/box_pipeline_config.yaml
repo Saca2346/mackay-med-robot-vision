@@ -40,6 +40,8 @@ grouping:
 
 ocr:
   engine: "rapidocr"               # "rapidocr" (disarankan, CPU) atau "tesseract"
+  backend: "onnxruntime"           # mesin RapidOCR. "openvino" diuji 09-10: benchmark crop besar 2,4x lebih cepat,
+                                   #   tapi replay rs_uji1 lebih lambat (321 vs 281 ms/kotak) dan tanpa AMBIL -> TIDAK dipakai
   min_confidence: 0.90             # token OCR di bawah ini dianggap ragu; 0.90 = 0 bacaan yakin salah pada 123 kotak dataset
   retry_flip_below: 0.80           # dua arah baca masih ragu -> coba arah ketiga (90 derajat kanan)
   min_crop_height: 48              # sisi terpendek crop minimal 48 px (diperbesar dulu kalau kurang)
@@ -92,14 +94,18 @@ catalog:
   - "scoreflex"
   - "permanent sled bag"
 
-camera:                            # webcam eksternal HP w300 (USB): 1920x1080 30 fps, fokus tetap
-  index: "auto"                    # "auto" = kamera dengan resolusi terbesar (w300; kamera laptop cuma 640x480),
-                                   # atau nomor tetap: 0 = w300, 1 = kamera laptop (urutan bisa berubah)
+camera:                            # Intel RealSense (D435/D435i/D415), aktif sejak 08-10 -- ganti dari webcam w300
+  backend: "realsense"              # lewat pyrealsense2, aliran WARNA saja (bukan enumerasi index MSMF/DSHOW --
+                                    # satu RealSense muncul sbg beberapa node/warna+depth+2x IR, "auto" bisa salah)
   width: 1920
   height: 1080
   fps: 30
-  backend: "msmf"                  # msmf = 30 fps; dshow cuma 20 fps di w300
-  fourcc: "MJPG"                   # tanpa MJPG, 1080p lewat USB jatuh ke fps rendah
+  serial: ""                       # isi nomor seri device kalau ada >1 RealSense tersambung; kosong = pakai yg pertama
+  # --- pengaturan lama, webcam eksternal HP w300 (USB), kembalikan kalau RealSense dilepas ---
+  # index: "auto"                  # "auto" = kamera dengan resolusi terbesar (w300; kamera laptop cuma 640x480),
+  #                                # atau nomor tetap: 0 = w300, 1 = kamera laptop (urutan bisa berubah)
+  # backend: "msmf"                # msmf = 30 fps; dshow cuma 20 fps di w300
+  # fourcc: "MJPG"                 # tanpa MJPG, 1080p lewat USB jatuh ke fps rendah
 output:
   view_width: 0                    # lebar jendela tampilan (0 = ukuran asli); lewat Remmina pakai 1280
   screens_dir: "results/screens"

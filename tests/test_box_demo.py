@@ -20,21 +20,21 @@ def test_positions_skip_rows_without_rack_or_level(tmp_path):
     p.write_text("box_id,rak,level,kolom,sumber\nK01,R1,2,5,tim\nK02,,1,,\nK03,R2,,,\n", encoding="utf-8")
     pos = load_positions(p)
     assert list(pos) == ["K01"]
-    assert str(pos["K01"]) == "rak R1, level 2, kolom 5"
+    assert str(pos["K01"]) == "rack R1, level 2, column 5"
     assert load_positions(tmp_path / "tidak_ada.csv") == {}
 
 
 def test_unparseable_request_is_invalid_and_never_guessed(tmp_path):
     res = lookup("angiolite 2.5", inv(tmp_path), {}, TODAY)           # panjang tidak ada
     assert res.status == INVALID and res.box is None
-    assert "belum lengkap" in res.reason
+    assert "incomplete" in res.reason
     msg = to_tm_message(res)
     assert msg["status"] == INVALID and msg["rack"] == "" and msg["needs_doctor_confirmation"] is True
 
 
 def test_no_stock_is_habis(tmp_path):
     res = lookup("angiolite 2.5 x 29", inv(tmp_path), {}, TODAY)
-    assert res.status == HABIS and res.reason == "tidak ada di inventaris"
+    assert res.status == HABIS and res.reason == "not in the inventory"
 
 
 def test_taken_box_is_habis_with_reason(tmp_path):
@@ -76,7 +76,7 @@ def test_fefo_order_picks_earliest_expiry(tmp_path):
              for k, e in (("K01", "2029-04-26"), ("K03", "2029-03-10"), ("K17", "2029-03-12"))]
     pos = {b.box_id: Position("R1", "1", b.box_id[1:], "contoh") for b in boxes}
     res = lookup("permanent sled bag", inv(tmp_path, *boxes), pos, TODAY)
-    assert res.status == SIAP and res.box.box_id == "K03" and "CONTOH" in res.reason
+    assert res.status == SIAP and res.box.box_id == "K03" and "EXAMPLE" in res.reason
 
 
 def test_log_is_one_json_line_per_request(tmp_path):
@@ -90,4 +90,4 @@ def test_log_is_one_json_line_per_request(tmp_path):
 
 def test_text_shows_what_was_understood(tmp_path):
     out = to_text(lookup("terumo accuforce 2,75 x 20", inv(tmp_path), {}, TODAY))
-    assert "accuforce (terumo), diameter 2.75 mm, panjang 20 mm" in out
+    assert "accuforce (terumo), diameter 2.75 mm, length 20 mm" in out

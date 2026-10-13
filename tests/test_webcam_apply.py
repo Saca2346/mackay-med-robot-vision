@@ -25,7 +25,7 @@ def test_apply_reading_combines_and_writes_reason():
     ev2.support = support(ev2, REQ)
     m.apply_reading(st, ev2, CANDIDATE, "baru REF cocok", ("k",), 100.0, 1)
     assert st.stable(2) == MATCH
-    assert st.last_reason.startswith("gabungan 2 bacaan") and "teks" in st.last_reason and "REF" in st.last_reason
+    assert st.last_reason.startswith("combined 2 readings") and "text" in st.last_reason and "REF" in st.last_reason
 
 
 def test_reading_log_keeps_raw_ocr_text_for_misread_analysis():
@@ -85,7 +85,7 @@ def test_process_logs_why_box_numbers_are_doubted_and_skips_wrong_motion():
         det.xs = [x + 9 for x in det.xs]                   # semua kotak tergeser 9 px (IoU < 0,5)
         twb.process(frame, det, None, tr, None, cfg, 2, motion_est=me)
         rows = [r for r in log.getvalue().splitlines() if ",stale," in r]
-        assert len(rows) == 8 and "pasangan lemah" in rows[0] and "8 kotak" in rows[0]
+        assert len(rows) == 8 and "weak pair" in rows[0] and "8 boxes" in rows[0]
     finally:
         twb.READ_LOG = None
 
@@ -115,3 +115,40 @@ def test_rack_area_drops_objects_outside_the_rack():
     assert len(ids) == 6
     *_, ids, _, _ = twb.process(frame, FakeDet(), None, SimpleTracker(), None, cfg, 0, roi=(0.0, 0.0, 0.6, 0.75))
     assert len(ids) == 5                                                      # benda di luar area rak diabaikan
+
+
+def _group(x, width, length=400):
+    from types import SimpleNamespace
+    poly = [(x, 50), (x + width, 50), (x + width, 50 + length), (x, 50 + length)]
+    return SimpleNamespace(box=SimpleNamespace(poly=poly))
+
+
+def test_drop_wide_removes_monitor_but_keeps_cut_box():
+    m = load()
+    spines = [_group(400 + 40 * i, 35) for i in range(6)]
+    cut = _group(1240, 35, length=90)                       # box cut by the frame edge: short, same width
+    monitor = _group(0, 330, length=240)                    # D455 08-10: monitor behind the rack
+    kept = m.drop_wide(spines + [cut, monitor])
+    assert monitor not in kept and cut in kept and len(kept) == 7
+
+
+def test_printed_expiry_steers_fefo_only_after_two_reads():
+    import datetime as dt
+    m = load()
+    st = TrackState()
+    day = dt.date(2029, 3, 10)
+    m.apply_reading(st, Evidence(dates=(day,)), CANDIDATE, "", ("k",), 1.0, 1)
+    assert st.expiry is None                                # one read is not enough
+    m.apply_reading(st, Evidence(dates=(day,)), CANDIDATE, "", ("k",), 1.0, 1)
+    assert st.expiry == day and st.expiry_src == "text"
+    m.apply_reading(st, Evidence(dates=(dt.date(2029, 3, 12),)), CANDIDATE, "", ("k",), 1.0, 1)
+    assert st.expiry is None                                # K03 vs K17 conflict -> no date
+
+
+def test_roi_cut_warns_when_area_slices_a_box():
+    m = load()
+    boxes = [_group(400 + 40 * i, 35) for i in range(5)]   # x 400..595, width 35
+    w, h = 1280, 800
+    assert m.roi_cut(boxes, None, w, h) == 0
+    assert m.roi_cut(boxes, (0.25, 0, 1, 1), w, h) == 0       # margin left of the first box
+    assert m.roi_cut(boxes, (412 / w, 0, 1, 1), w, h) == 1     # D455 08-10: edge through K15

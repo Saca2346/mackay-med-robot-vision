@@ -94,13 +94,17 @@ catalog:
   - "scoreflex"
   - "permanent sled bag"
 
-camera:                           # dipakai HANYA kalau webcam dicolok LANGSUNG ke server (bukan lewat
-                                   # stream_webcam.py+tunnel laptop); belum pernah dicoba di server Linux ini.
-  index: "auto"                   # "auto" = kamera resolusi terbesar; backend "any" WAJIB di Linux -- "msmf"
-  width: 1920                     # (bawaan kalau backend tidak diisi) itu backend Windows, tidak ada di Ubuntu
+camera:                           # dipakai HANYA kalau kamera dicolok LANGSUNG ke server (tanpa --source dan tanpa
+                                   # stream_webcam.py + tunnel laptop); belum pernah dicoba di server Linux ini.
+  backend: "realsense"            # Intel RealSense lewat pyrealsense2 (aliran warna saja). Perlu: pip install
+                                   # pyrealsense2 + aturan udev (lihat docs/BOX_PIPELINE.md); colok ke port USB 3
+  width: 1920
   height: 1080
   fps: 30
-  backend: "any"                  # cv2.CAP_ANY -> OpenCV pilih sendiri (V4L2 di Linux)
+  serial: ""                      # isi nomor seri kalau >1 RealSense tersambung; kosong = pakai yang pertama
+  # --- webcam UVC biasa di Linux: backend "any" WAJIB ("msmf" itu backend Windows, tidak ada di Ubuntu) ---
+  # index: "auto"
+  # backend: "any"                # cv2.CAP_ANY -> OpenCV pilih sendiri (V4L2)
 
 output:
   view_width: 1280                 # jendela tampilan diperkecil ke lebar 1280 supaya lancar lewat Remmina (RDP);

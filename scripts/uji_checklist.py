@@ -52,23 +52,23 @@ def main() -> None:
 
     inv_path = pathlib.Path(args.inventaris)
     if not inv_path.exists():
-        sys.exit(f"Inventaris tidak ada: {inv_path} (jalankan dari folder proyek)")
+        sys.exit(f"Inventory missing: {inv_path} (run from the project folder)")
     inv, positions = Inventory(inv_path), load_positions(args.posisi)
 
-    print(f"Inventaris: {inv_path} ({len(inv.boxes)} kotak: {inv.counts()})")
-    print(f"Posisi    : {args.posisi} ({len(positions)} baris"
-          + (", CONTOH" if any(p.sumber == "contoh" for p in positions.values()) else "") + ")")
+    print(f"Inventory : {inv_path} ({len(inv.boxes)} boxes: {inv.counts()})")
+    print(f"Positions : {args.posisi} ({len(positions)} rows"
+          + (", EXAMPLE" if any(p.sumber == "contoh" for p in positions.values()) else "") + ")")
     k10 = inv.boxes.get("K10")
     k10_taken = k10 is not None and k10.status == STATUS_DIAMBIL
     if not k10_taken:
-        print("PERHATIAN : K10 tidak berstatus 'diambil' -> uji 17 dilewati (hasilnya wajar SIAP, bukan HABIS)")
+        print("NOTE      : K10 is not 'taken' -> test 17 skipped (READY is correct then, not OUT OF STOCK)")
 
     rows, gagal = [], 0
-    print(f"\n{'#':>2}  {'permintaan':<28}{'diharapkan':<24}{'hasil':<24}{'kotak':<6} verdict")
+    print(f"\n{'#':>2}  {'request':<28}{'expected':<24}{'result':<24}{'box':<6} verdict")
     for i, (q, want, want_box) in enumerate(UJI, 1):
         if i == 17 and not k10_taken:
-            rows.append((i, q, want, "-", "", "DILEWATI"))
-            print(f"{i:>2}  {q:<28}{want + ' ' + want_box:<24}{'-':<24}{'':<6} DILEWATI")
+            rows.append((i, q, want, "-", "", "SKIPPED"))
+            print(f"{i:>2}  {q:<28}{want + ' ' + want_box:<24}{'-':<24}{'':<6} SKIPPED")
             continue
         res = lookup(q, inv, positions)
         got_box = res.box.box_id if res.box else ""
@@ -77,33 +77,38 @@ def main() -> None:
         if want != SIAP and res.box is not None:
             ok = False
         gagal += not ok
-        verdict = "LULUS" if ok else "GAGAL"
+        verdict = "PASS" if ok else "FAIL"
         rows.append((i, q, want, res.status, got_box, verdict))
         print(f"{i:>2}  {q:<28}{(want + ' ' + want_box).strip():<24}{res.status:<24}{got_box:<6} {verdict}")
 
-    lulus = sum(r[5] == "LULUS" for r in rows)
-    print(f"\nLULUS {lulus}, GAGAL {gagal}, DILEWATI {sum(r[5] == 'DILEWATI' for r in rows)} dari {len(UJI)}")
+    lulus = sum(r[5] == "PASS" for r in rows)
+    print(f"\nPASS {lulus}, FAIL {gagal}, SKIPPED {sum(r[5] == 'SKIPPED' for r in rows)} of {len(UJI)}")
 
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     out = ROOT / "results"
     out.mkdir(exist_ok=True)
     with open(out / f"uji_checklist_{stamp}.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["no", "permintaan", "diharapkan", "hasil", "kotak", "verdict"])
+        w.writerow(["no", "request", "expected", "result", "box", "verdict"])
         w.writerows(rows)
     with open(out / f"uji_checklist_{stamp}.md", "w", encoding="utf-8") as f:
-        f.write(f"# Uji checklist {stamp}\n\nLULUS {lulus}, GAGAL {gagal} dari {len(UJI)}\n\n"
-                "| # | Permintaan | Diharapkan | Hasil | Kotak | Verdict |\n| --- | --- | --- | --- | --- | --- |\n")
+        f.write(f"# Checklist test {stamp}\n\nPASS {lulus}, FAIL {gagal} of {len(UJI)}\n\n"
+                "| # | Request | Expected | Result | Box | Verdict |\n| --- | --- | --- | --- | --- | --- |\n")
         for r in rows:
             f.write(f"| {r[0]} | `{r[1]}` | {r[2]} | {r[3]} | {r[4]} | {r[5]} |\n")
     print(f"Laporan   : results/uji_checklist_{stamp}.csv / .md")
 
     if args.kamera:
-        if not 1 <= args.kamera <= 16:
-            sys.exit("--kamera hanya untuk nomor 1-16 (barang yang ada di rak)")
+        # 17 (angiolite 4 x 19, K10) hanya bisa diuji kamera kalau K10 memang ada di rak; pasangan K15/K10 = dua angiolite
+        # dengan tampilan hampir sama, kasus "mirip" paling berisiko
+        last = 16 if k10_taken else 17
+        if not 1 <= args.kamera <= last:
+            sys.exit(f"--kamera only for numbers 1-{last} (items on the shelf)")
         q, _, box = UJI[args.kamera - 1]
-        print(f"\nKamera nomor {args.kamera}: {q} (harus kotak {box}). Catat hasilnya di checklist; "
-              "MATCH pada kotak lain = GAGAL.")
+        if args.kamera == 17:
+            box = "K10"
+        print(f"\nCamera test {args.kamera}: {q} (must be box {box}). Record the result in the checklist; "
+              "a MATCH on any other box = FAIL.")
         cmd = [sys.executable, str(ROOT / "scripts" / "demo_request.py"), "--sekali", q, "--kamera",
                "--inventaris", args.inventaris, "--posisi", args.posisi]
         if args.kamera_arg:

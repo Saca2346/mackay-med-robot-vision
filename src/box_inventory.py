@@ -117,9 +117,11 @@ class Inventory:
         """Kotak TERVERIFIKASI yang cocok dengan permintaan, urut FEFO (kedaluwarsa paling dulu; tanpa tanggal
         paling akhir). Kotak kedaluwarsa tidak ikut."""
         today = today or dt.date.today()
+        want = getattr(req, "expiry", None)            # request for one specific box among identical ones
         out = [b for b in self.boxes.values() if b.status in ACTIVE and b.product == req.product
                and (req.diameter is None or (b.diameter is not None and abs(b.diameter - req.diameter) < 1e-6
                                              and b.length is not None and abs(b.length - req.length) < 1e-6))
+               and (want is None or b.expiry_date() == want)
                and not (b.expiry_date() and b.expiry_date() < today)]
         return sorted(out, key=lambda b: (b.expiry_date() is None, b.expiry_date() or dt.date.max, b.box_id))
 

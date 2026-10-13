@@ -6,3 +6,5 @@ onnxruntime>=1.17            # mesin OCR rapidocr (server trse_venv belum punya:
 zxing-cpp>=2.2                # barcode GS1 (GTIN, kedaluwarsa, LOT); tanpa ini verifikasi jalan tanpa barcode
 openvino>=2024.0              # laptop saja: model OpenVINO di iGPU Intel (sekitar 10 FPS vs 2 FPS .pt di CPU)
 pytest>=8                     # untuk tests/test_box_*.py
+pyrealsense2>=2.55            # HANYA kalau kamera.backend = "realsense" (Intel RealSense D435/D435i/D415);
+                              # tidak dipakai untuk webcam UVC biasa (msmf/dshow/any)

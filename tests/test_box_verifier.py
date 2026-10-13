@@ -123,7 +123,9 @@ def test_parse_request_in_plain_language():
         "ambil terumo accuforce 2,75 x 20": ("accuforce", 2.75, 20.0),
         "nagomi 3/24": ("ultimaster nagomi", 3.0, 24.0),
         "Terumo Ultimaster Nagomi Ø2.75 L33": ("ultimaster nagomi", 2.75, 33.0),
-        "cari angiolit panjang 29 diameter 2.5": ("angiolite", 2.5, 29.0),          # salah ketik + urutan terbalik
+        "cari angiolit panjang 29 diameter 2.5": ("angiolite", 2.5, 29.0),
+        "pick angiolite diameter 2.5 length 29": ("angiolite", 2.5, 29.0),          # English
+        "get me angiolite 4 by 19": ("angiolite", 4.0, 19.0),          # salah ketik + urutan terbalik
         "boston scientific permanent sled bag": ("permanent sled bag", None, None),
         "xperience 2.5 15": ("xperience pro", 2.5, 15.0),
     }
@@ -131,7 +133,7 @@ def test_parse_request_in_plain_language():
         r = parse_request(text)
         assert (r.product, r.diameter, r.length) == want, text
     assert describe_request(parse_request("pilih ivascular angiolite diameter 4 mm panjang 19")) == \
-        "angiolite (ivascular), diameter 4 mm, panjang 19 mm"
+        "angiolite (ivascular), diameter 4 mm, length 19 mm"
 
 
 def test_parse_request_rejects_unclear_requests():

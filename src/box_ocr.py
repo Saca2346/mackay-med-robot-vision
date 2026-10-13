@@ -41,13 +41,16 @@ class OcrResult:
 
 class SizeTextReader:
     def __init__(self, engine: str = "rapidocr", retry_flip_below: float = 0.80, det_limit=("max", 1280),
-                 threads: int = 0, use_cuda: bool = False):
+                 threads: int = 0, use_cuda: bool = False, backend: str = "onnxruntime"):
         """det_limit: ukuran gambar untuk detektor teks RapidOCR. Bawaan RapidOCR ("min", 736) memperbesar crop
         panjang-tipis sampai detektor gagal (tidak ada teks sama sekali) dan 10x lebih lambat; ("max", 1280)
         membaca paling banyak di 89 crop size_label dataset (lihat docs/BOX_PIPELINE.md).
         threads: thread CPU untuk satu mesin OCR (0 = semua core). Beberapa mesin OCR paralel yang masing-masing
         memakai SEMUA core saling berebut (terukur 1-2 detik per kotak di server) -> bagi core per mesin.
-        use_cuda: OCR di GPU NVIDIA (butuh paket onnxruntime-gpu); kalau tidak tersedia RapidOCR kembali ke CPU."""
+        use_cuda: OCR di GPU NVIDIA (butuh paket onnxruntime-gpu); kalau tidak tersedia RapidOCR kembali ke CPU.
+        backend: "onnxruntime" (bawaan) atau "openvino" (CPU Intel). Uji 09-10 di laptop i3: crop punggung besar
+        640 vs 1556 ms (teks identik 24/24), TAPI replay pipeline (crop size_label kecil, ukuran berubah-ubah)
+        321 vs 281 ms per kotak dan tanpa AMBIL -> jangan dipakai tanpa replay ulang. Gagal dimuat -> onnxruntime."""
         self.engine_name = engine
         self.retry_flip_below = retry_flip_below
         self._engine = None
@@ -66,7 +69,19 @@ class SizeTextReader:
                         params["EngineConfig.onnxruntime.inter_op_num_threads"] = 1
                     if use_cuda:
                         params["EngineConfig.onnxruntime.use_cuda"] = True
-                    self._engine = RapidOCR(params=params)
+                    self._engine = None
+                    if backend == "openvino" and not use_cuda:
+                        try:
+                            from rapidocr import EngineType
+                            ov = dict(params, **{f"{p}.engine_type": EngineType.OPENVINO for p in ("Det", "Cls", "Rec")})
+                            if threads > 0:
+                                ov["EngineConfig.openvino.inference_num_threads"] = int(threads)
+                            self._engine = RapidOCR(params=ov)
+                        except Exception as e:  # noqa: BLE001 - OpenVINO tidak ada / gagal -> mesin bawaan
+                            print(f"[ocr] OpenVINO tidak bisa dipakai ({type(e).__name__}: {e}) -> onnxruntime")
+                    self.backend = "openvino" if self._engine is not None else "onnxruntime"
+                    if self._engine is None:
+                        self._engine = RapidOCR(params=params)
                     self._api = 2
                     # tanpa ini setiap crop tanpa teks mencetak "[WARNING] The text detection result is empty"
                     logging.getLogger("RapidOCR").setLevel(logging.ERROR)

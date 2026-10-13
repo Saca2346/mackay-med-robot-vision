@@ -71,7 +71,7 @@ def test_count_then_find_the_one_requested_box():
     decide(tr, ids, lambda i: MATCH if i == 7 else IGNORED)                  # 19 lainnya pasti bukan target
     run(sess, tr, SHELF, clock, 0.2)
     assert sess.phase == DITEMUKAN and sess.pick == target
-    assert "AMBIL" in sess.message and "19 kotak lain tidak diambil (19 pasti bukan target)" in sess.detail
+    assert "PICK" in sess.message and "19 other boxes are not picked (19 certainly not the target)" in sess.detail
 
 
 # ------------------------------------------------------------------ 2 TIDAK ADA hanya kalau pasti
@@ -105,7 +105,7 @@ def test_boxes_never_checked_block_tidak_ada():
         tr.tracks.pop(tid)
     decide(tr, ids[:12], lambda i: IGNORED)
     run(sess, tr, SHELF[:12], clock, 0.5)
-    assert sess.phase == PERLU_KONFIRMASI and "12 dari 20" in sess.message
+    assert sess.phase == PERLU_KONFIRMASI and "12 of 20" in sess.message
 
 
 def test_boxes_out_of_view_never_count_for_tidak_ada():
@@ -115,7 +115,7 @@ def test_boxes_out_of_view_never_count_for_tidak_ada():
         tr.tracks[tid]["poly"] = np.float32(spine(2500 + 60 * tid))
         tr.tracks[tid]["was_out"] = True
     run(sess, tr, SHELF[:7], clock, 0.5)                      # hanya 7 kotak terlihat
-    assert sess.phase == PERLU_KONFIRMASI and "7 dari 14" in sess.message
+    assert sess.phase == PERLU_KONFIRMASI and "7 of 14" in sess.message
 
 
 def test_tidak_ada_waits_for_rereading_of_doubtful_boxes():
@@ -151,7 +151,7 @@ def test_doubtful_box_number_holds_pick_and_rechecks_instead_of_cancelling():
     st.mark_stale()                                          # tangan meraih kotak: nomornya diragukan
     run(sess, tr, SHELF, clock, 1.0)
     assert sess.phase == DITEMUKAN and sess.pick == ids[4] and not sess.solid     # dikunci, JANGAN diambil
-    assert "JANGAN diambil" in sess.message and events(sess, "CEK ULANG") and not events(sess, "BATAL AMBIL")
+    assert "do NOT take it yet" in sess.message and events(sess, "RECHECK") and not events(sess, "PICK CANCELLED")
     st.stale = False
     st.add(CONFIRM, EMPTY, (frozenset(), False))             # tangan masih menutupi: kosong, tetap ditahan
     st.add(CANDIDATE, KEY, NAME_ONLY)                        # "angiolite" saja: belum cukup (saudaranya juga)
@@ -159,7 +159,7 @@ def test_doubtful_box_number_holds_pick_and_rechecks_instead_of_cancelling():
     assert sess.phase == DITEMUKAN and not sess.solid
     st.add(CANDIDATE, KEY, REF_ONLY)                         # REF 2.5 x 29 terbaca: kotak yang sama
     run(sess, tr, SHELF, clock, 0.2)
-    assert sess.phase == DITEMUKAN and sess.solid and events(sess, "AMBIL DIPASTIKAN")
+    assert sess.phase == DITEMUKAN and sess.solid and events(sess, "PICK CONFIRMED")
 
 
 def test_recheck_of_doubtful_pick_rejects_sibling_box():
@@ -175,7 +175,7 @@ def test_recheck_of_doubtful_pick_rejects_sibling_box():
     assert not sess.solid
     st.add(IGNORED, KEY, SIBLING)
     run(sess, tr, SHELF, clock, 0.2)
-    assert sess.phase != DITEMUKAN and events(sess, "BATAL AMBIL") and not events(sess, "AMBIL DIPASTIKAN")
+    assert sess.phase != DITEMUKAN and events(sess, "PICK CANCELLED") and not events(sess, "PICK CONFIRMED")
 
 
 def test_recheck_times_out_only_while_box_is_in_its_slot():
@@ -185,7 +185,7 @@ def test_recheck_times_out_only_while_box_is_in_its_slot():
     assert sess.phase == DITEMUKAN and not sess.solid
     run(sess, tr, SHELF, clock, 1.5)                         # > relock_s tanpa bacaan baru yang lengkap
     assert sess.phase != DITEMUKAN
-    assert any("tidak terpastikan" in e[3] for e in events(sess, "BATAL AMBIL"))
+    assert any("not reconfirmed" in e[3] for e in events(sess, "PICK CANCELLED"))
 
 
 def test_box_grabbed_right_after_doubt_is_taken_not_cancelled():
@@ -198,7 +198,7 @@ def test_box_grabbed_right_after_doubt_is_taken_not_cancelled():
         run(sess, tr, polys, clock, 0.1)
         assert sess.phase == DITEMUKAN
     run(sess, tr, [p for i, p in enumerate(SHELF) if i != 4], clock, 2.5)
-    assert sess.phase == SELESAI and events(sess, "TERAMBIL") and not events(sess, "BATAL AMBIL")
+    assert sess.phase == SELESAI and events(sess, "TAKEN") and not events(sess, "PICK CANCELLED")
 
 
 def test_changed_look_of_pick_in_slot_is_rechecked():
@@ -207,9 +207,9 @@ def test_changed_look_of_pick_in_slot_is_rechecked():
     run(sess, tr, SHELF, clock, 0.5, frame=_scene("box"))
     assert sess.phase == DITEMUKAN and sess.solid
     run(sess, tr, SHELF, clock, 0.3, frame=_scene("other"))  # nomor sama, isi slot tampak lain: belum pasti
-    assert sess.solid and not events(sess, "CEK ULANG")      # (bisa jadi potongan slot sesaat meleset)
+    assert sess.solid and not events(sess, "RECHECK")      # (bisa jadi potongan slot sesaat meleset)
     run(sess, tr, SHELF, clock, 0.5, frame=_scene("other"))  # berturut-turut -> dipastikan ulang
-    assert sess.phase == DITEMUKAN and not sess.solid and events(sess, "CEK ULANG")
+    assert sess.phase == DITEMUKAN and not sess.solid and events(sess, "RECHECK")
     tr.state(ids[4]).add(MATCH, KEY, FULL)                   # bacaan BARU: tetap kotak yang diminta
     run(sess, tr, SHELF, clock, 0.5, frame=_scene("other"))
     assert sess.phase == DITEMUKAN and sess.solid
@@ -258,7 +258,7 @@ def test_expected_count_shortfall_blocks_tidak_ada():
     sess, tr, clock, ids = started(n=18, expected=20)                         # detektor hanya melihat 18 dari 20
     decide(tr, ids, lambda i: IGNORED)
     run(sess, tr, SHELF[:18], clock, 0.5)
-    assert sess.phase == PERLU_KONFIRMASI and "18 dari 20" in sess.message
+    assert sess.phase == PERLU_KONFIRMASI and "18 of 20" in sess.message
 
 
 # ------------------------------------------------------------------ 3 AMBIL -> TERAMBIL -> permintaan lagi
@@ -282,7 +282,7 @@ def test_taken_box_verified_then_same_request_again():
     assert sess.phase == SELESAI and [t.track for t in sess.taken] == [a, b]
     sess.request_again(now=clock.t)
     run(sess, tr, rest2, clock, 0.5)
-    assert sess.phase == TIDAK_ADA and "lagi" in sess.message                 # 18 sisanya bukan target
+    assert sess.phase == TIDAK_ADA and "no more" in sess.message                 # 18 sisanya bukan target
 
 
 def test_request_again_waits_until_current_box_is_taken():
@@ -331,7 +331,7 @@ def test_detector_miss_is_not_taken_while_box_still_visible():
     run(sess, tr, SHELF, clock, 0.5, frame=_scene("box"))                     # gambar kotak AMBIL disimpan
     rest = [p for i, p in enumerate(SHELF) if i != 4]
     run(sess, tr, rest, clock, 4.0, frame=_scene("box"))                      # detektor gagal, kotak masih ada
-    assert sess.phase == DITEMUKAN and "masih terlihat" in sess.detail
+    assert sess.phase == DITEMUKAN and "still in its slot" in sess.detail
     run(sess, tr, rest, clock, 2.5, frame=_scene("empty"))                    # kotak benar-benar diambil
     assert sess.phase == SELESAI
 
@@ -352,7 +352,7 @@ def test_verification_change_cancels_pick():
     tr.state(ids[4]).history.append((CONFIRM, None))                         # bacaan baru bertentangan
     run(sess, tr, SHELF, clock, 0.2)
     assert sess.phase != DITEMUKAN and sess.pick is None
-    assert any(e[1] == "BATAL AMBIL" for e in sess.events)
+    assert any(e[1] == "PICK CANCELLED" for e in sess.events)
 
 
 # ------------------------------------------------------------------ merek & nama sama, ukuran beda
@@ -376,7 +376,7 @@ def test_one_wrong_size_source_is_never_a_match():
                      length_ok=True)
     wrong_ref = parse_refs("SCCDSR14150250024")                              # REF: 2.5 x 24
     d, reason, _ = decide_multi(Evidence(text=right, refs=wrong_ref), REQ)
-    assert d == CONFIRM and "bertentangan" in reason                          # teks cocok tapi REF tidak -> ragu
+    assert d == CONFIRM and "contradicting" in reason                          # teks cocok tapi REF tidak -> ragu
     size_only = Identity(product="angiolite", product_ok=True, diameter=2.5, diameter_ok=True)
     assert decide_multi(Evidence(text=size_only), REQ)[0] == CANDIDATE        # panjang belum terbaca: bukan MATCH
 
@@ -425,12 +425,12 @@ def test_box_pulled_with_changing_number_is_taken_not_cancelled():
     sess, tr, clock, ids = _pick_ready()
     pulled = [spine(100 + 60 * 4, y=300 - 50) if i == 4 else p for i, p in enumerate(SHELF)]
     run(sess, tr, pulled, clock, 0.1)                                    # mulai ditarik (nomor sama)
-    assert "sedang diambil" in sess.message
+    assert "being taken" in sess.message
     tr.tracks.pop(ids[4])                                                # nomornya berganti saat bergerak
     for k in range(2, 5):
         pulled = [spine(100 + 60 * 4, y=300 - 50 * k) if i == 4 else p for i, p in enumerate(SHELF)]
         run(sess, tr, pulled, clock, 0.1)
-        assert sess.phase == DITEMUKAN and not any(e[1] == "BATAL AMBIL" for e in sess.events)
+        assert sess.phase == DITEMUKAN and not any(e[1] == "PICK CANCELLED" for e in sess.events)
     rest = [p for i, p in enumerate(SHELF) if i != 4]
     run(sess, tr, rest, clock, 2.5)
     assert sess.phase == SELESAI
@@ -447,7 +447,7 @@ def test_still_box_with_other_number_in_slot_is_rechecked():
             tr.state(new).add(d, k, s)
         run(sess, tr, SHELF, clock, 0.3)
         assert (sess.phase == DITEMUKAN and sess.solid) if solid else \
-            (sess.phase != DITEMUKAN and events(sess, "BATAL AMBIL"))
+            (sess.phase != DITEMUKAN and events(sess, "PICK CANCELLED"))
 
 
 def test_pick_held_on_one_weaker_reading_and_solid_again():
@@ -455,7 +455,7 @@ def test_pick_held_on_one_weaker_reading_and_solid_again():
     st = tr.state(ids[4])
     st.history.append((CANDIDATE, KEY))                                  # label sebagian tertutup tangan
     run(sess, tr, SHELF, clock, 0.2)
-    assert sess.phase == DITEMUKAN and not sess.solid and "JANGAN diambil" in sess.message
+    assert sess.phase == DITEMUKAN and not sess.solid and "do NOT take it yet" in sess.message
     st.history.append((MATCH, KEY))
     run(sess, tr, SHELF, clock, 0.2)
     assert sess.phase == DITEMUKAN and sess.solid
@@ -491,7 +491,7 @@ def test_box_held_in_front_of_shelf_is_not_picked():
     ids = run(sess, tr, polys, clock, 1.0)
     decide(tr, ids, lambda i: MATCH if i == 20 else IGNORED)
     run(sess, tr, polys, clock, 1.0)
-    assert sess.phase != DITEMUKAN and "tidak di rak" in sess.message
+    assert sess.phase != DITEMUKAN and "not on the shelf" in sess.message
 
 
 def test_box_moving_in_hand_is_not_picked_until_it_rests_on_shelf():
@@ -525,7 +525,7 @@ def test_neighbour_filling_the_gap_after_pick_is_taken_not_cancelled():
         run(sess, tr, polys, clock, 0.1)
     run(sess, tr, polys, clock, 1.5)
     assert sess.phase == SELESAI and [t.track for t in sess.taken] == [ids[4]]
-    assert events(sess, "TERAMBIL") and not events(sess, "BATAL AMBIL")
+    assert events(sess, "TAKEN") and not events(sess, "PICK CANCELLED")
     assert ids[5] in tr.tracks                               # kotak sebelah tetap ada (nomornya tidak dibuang)
     assert sess.watch is None and not sess.warning           # tidak ada peringatan "slot terisi lagi"
 
@@ -553,7 +553,7 @@ def test_recheck_cannot_hang_when_box_flickers_in_and_out():
         if sess.phase != DITEMUKAN:
             break
     assert sess.phase != DITEMUKAN and clock.t < 2.5 + 21
-    assert any("tidak terpastikan ulang dalam 20" in e[3] for e in events(sess, "BATAL AMBIL"))
+    assert any("not reconfirmed within 20" in e[3] for e in events(sess, "PICK CANCELLED"))
 
 
 def test_slot_number_is_taken_over_only_once():
@@ -564,8 +564,8 @@ def test_slot_number_is_taken_over_only_once():
     assert first not in (None, ids[4])
     tr.tracks.pop(first)                                     # nomornya berganti lagi
     run(sess, tr, SHELF, clock, 2.5)
-    assert len([e for e in events(sess, "CEK ULANG") if "kini bernomor" in e[3]]) == 1
-    assert sess.phase != DITEMUKAN and events(sess, "BATAL AMBIL")
+    assert len([e for e in events(sess, "RECHECK") if "is now #" in e[3]]) == 1
+    assert sess.phase != DITEMUKAN and events(sess, "PICK CANCELLED")
 
 
 def _moved_away():
@@ -579,10 +579,10 @@ def _moved_away():
 def test_box_moved_to_another_slot_is_not_counted_as_taken():
     # replay uji 30-09 14:09: kotak dipindah, bukan diambil -> dulu TERAMBIL dan pencarian berhenti
     sess, tr, clock, ids, moved, nid = _moved_away()
-    assert sess.phase == DITEMUKAN and not events(sess, "TERAMBIL") and "dipindah" in sess.message
+    assert sess.phase == DITEMUKAN and not events(sess, "TAKEN") and "moved" in sess.message
     tr.state(nid).history.extend([(MATCH, KEY), (MATCH, KEY)])  # kotak di tempat baru terbaca: kotak yang diminta
     run(sess, tr, moved, clock, 0.5)
-    assert any("dipindah" in e[3] for e in events(sess, "BATAL AMBIL")) and not events(sess, "TERAMBIL")
+    assert any("moved" in e[3] for e in events(sess, "PICK CANCELLED")) and not events(sess, "TAKEN")
     assert sess.phase == DITEMUKAN and sess.pick == nid        # dicari ulang: AMBIL di tempat barunya
 
 
@@ -596,7 +596,7 @@ def test_new_box_elsewhere_that_is_not_the_target_confirms_taken():
 def test_unreadable_new_box_elsewhere_cancels_instead_of_guessing_taken():
     sess, tr, clock, ids, moved, nid = _moved_away()
     run(sess, tr, moved, clock, 15.0)
-    assert not events(sess, "TERAMBIL") and any("dipindah?" in e[3] for e in events(sess, "BATAL AMBIL"))
+    assert not events(sess, "TAKEN") and any("moved?" in e[3] for e in events(sess, "PICK CANCELLED"))
 
 
 def test_renumbered_or_edge_boxes_do_not_block_taken():
@@ -607,7 +607,7 @@ def test_renumbered_or_edge_boxes_do_not_block_taken():
     edge = spine(1900)                                       # benda baru terpotong di tepi kanan layar
     rest = [p for i, p in enumerate(SHELF) if i != 4] + [edge]
     run(sess, tr, rest, clock, 3.0)
-    assert sess.phase == SELESAI and events(sess, "TERAMBIL") and not events(sess, "BATAL AMBIL")
+    assert sess.phase == SELESAI and events(sess, "TAKEN") and not events(sess, "PICK CANCELLED")
 
 
 def test_split_pieces_of_known_boxes_do_not_block_taken():
@@ -617,7 +617,7 @@ def test_split_pieces_of_known_boxes_do_not_block_taken():
     piece = spine(100 + 60 * 9, y=300, h=150)                # potongan atas kotak ke-10, di dalam rentangnya
     rest = [p for i, p in enumerate(SHELF) if i not in (4, 9)] + [piece, spine(100 + 60 * 9, y=520, h=180)]
     run(sess, tr, rest, clock, 3.0)
-    assert sess.phase == SELESAI and events(sess, "TERAMBIL") and not events(sess, "BATAL AMBIL")
+    assert sess.phase == SELESAI and events(sess, "TAKEN") and not events(sess, "PICK CANCELLED")
 
 
 def test_taken_confirmation_is_not_cut_by_recheck_limit():
@@ -628,4 +628,54 @@ def test_taken_confirmation_is_not_cut_by_recheck_limit():
     run(sess, tr, SHELF, clock, 8.0)                         # tangan di depan kotak, belum terbaca ulang
     moved = [p for i, p in enumerate(SHELF) if i != 4] + [spine(100 + 60 * 20)]   # kotak baru muncul di ujung rak
     run(sess, tr, moved, clock, 14.0)                        # 22 s sejak cek ulang: slot kosong, kotak baru belum terbaca
-    assert sess.phase == DITEMUKAN and not events(sess, "BATAL AMBIL")
+    assert sess.phase == DITEMUKAN and not events(sess, "PICK CANCELLED")
+
+
+# ------------------------------------------------------------------ final check: moved or taken? (live test 09-10)
+def _pick_with_slot_image():
+    sess, tr, clock, ids = started()
+    decide(tr, ids, lambda i: MATCH if i == 4 else IGNORED)
+    run(sess, tr, SHELF, clock, 0.5, frame=_scene("box"))                     # picture of the picked box saved
+    assert sess.phase == DITEMUKAN and sess.solid and sess.box_patch is not None
+    return sess, tr, clock, ids
+
+
+def _neighbour_reads_in_slot(sess, tr, clock, ids, slot_look):
+    tr.state(ids[4]).mark_stale()                                             # hand reaches in: number in doubt
+    run(sess, tr, SHELF, clock, 0.3, frame=_scene(slot_look))
+    for _ in range(2):                                                        # what is in the slot now reads as
+        tr.state(ids[4]).add(IGNORED, ("other",), (frozenset({"tp"}), True))  # NOT the target (the neighbour)
+        run(sess, tr, SHELF, clock, 0.3, frame=_scene(slot_look))
+
+
+def test_neighbour_leaning_into_empty_slot_is_taken_not_cancelled():
+    # 09-10 17:31: Xperience Pro taken, Essential Pro leaned into its slot -> was PICK CANCELLED, must be TAKEN
+    sess, tr, clock, ids = _pick_with_slot_image()
+    _neighbour_reads_in_slot(sess, tr, clock, ids, "other")
+    assert sess.phase == SELESAI and events(sess, "TAKEN") and not events(sess, "PICK CANCELLED")
+    assert "final check" in events(sess, "TAKEN")[0][3]
+
+
+def test_slot_that_still_looks_like_the_box_is_never_called_taken():
+    # safety: contradicting readings, but the slot still shows the picked box -> cancel and search again
+    sess, tr, clock, ids = _pick_with_slot_image()
+    _neighbour_reads_in_slot(sess, tr, clock, ids, "box")
+    assert events(sess, "PICK CANCELLED") and not events(sess, "TAKEN")
+
+
+def test_shifted_neighbour_read_as_not_target_lets_the_box_count_as_taken():
+    # 09-10 17:30: "taken or moved? a new box is not read yet" although the new box was the shifted neighbour
+    sess, tr, clock, ids, moved, nid = _moved_away()
+    tr.state(nid).add(CONFIRM, ("other",), (frozenset(), True))             # read once: unsure, not the target
+    run(sess, tr, moved, clock, 16.0)
+    assert events(sess, "TAKEN") and not events(sess, "PICK CANCELLED")
+
+
+def test_taken_by_final_check_with_more_requested_does_not_crash():
+    # live test 10-10: TAKEN dropped a box number that was still in view (neighbour in the slot) -> KeyError
+    sess, tr, clock, ids = started(qty=2)
+    decide(tr, ids, lambda i: MATCH if i == 4 else IGNORED)
+    run(sess, tr, SHELF, clock, 0.5, frame=_scene("box"))
+    assert sess.phase == DITEMUKAN and sess.box_patch is not None
+    _neighbour_reads_in_slot(sess, tr, clock, ids, "other")                   # must not raise
+    assert events(sess, "TAKEN") and sess.phase == MENCARI and sess.remaining == 1

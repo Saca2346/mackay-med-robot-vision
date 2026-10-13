@@ -46,14 +46,14 @@ def test_order_commands_replace_add_skip():
 def test_order_queue_runs_items_in_order_and_keeps_results():
     q = OrderQueue(parse_order("angiolite 2.5 29; accuforce 2.75 20 jumlah 2"))
     assert q.start_next().req.product == "angiolite"
-    assert "berikutnya: accuforce" in q.describe()
-    q.finish(1, "SELESAI")
+    assert "next: accuforce" in q.describe()
+    q.finish(1, "DONE")
     q.add(parse_order("essential pro 3 40"))
     assert q.start_next().qty == 2
-    q.finish(0, "TIDAK ADA")
+    q.finish(0, "NOT FOUND")
     q.replace(parse_order("xperience pro 2.5 15"))                      # permintaan berubah tiba-tiba
     assert q.start_next().req.product == "xperience pro" and not q.pending
-    assert [r[3] for r in q.results] == ["SELESAI", "TIDAK ADA"]
+    assert [r[3] for r in q.results] == ["DONE", "NOT FOUND"]
 
 
 def _read_angiolite_2529():
