@@ -12,11 +12,26 @@ Newest entry first. One entry per finished piece of work: date, who, what change
   `rapatkan_label_tanggal.py`); 26 are `auto` on the server but `selesai` on the laptop (the 11 Oct batch rule); 1 the other way.
   Date tools exist only on the server (`review_tanggal.py`, `rapatkan_label_tanggal.py`, `cek_tanggal_terlewat.py`,
   `bandingkan_model.py`, ...); `labels_final_obb/IMG_20260923_132329_751.txt` differs.
-* Open: pulling the server copies needs the SSH key of `docs/REMOTE_SERVER_CLAUDE_CODEX.md` step 1 (laptop key is not on the
-  server yet). Then merge: server label content + laptop `selesai` status, after a check.
+* SSH key installed by the owner (`ssh trse-server` works without a password). Server copy pulled read-only to
+  `labeling\server_copy_20261014\`. Finding: the server is newer (12 Oct 02:31-02:56) and built on the laptop's 76: it fixed the
+  hourglass-as-"8" bug, tightened the iVascular date labels and deliberately reopened 26 photos with missed dates. So the laptop
+  took the server's expiry specs, `labels_final_obb` and date tools (laptop copy kept in
+  `labeling\archive\laptop_before_server_merge_20261014\`); labels are now identical. Exception: `labeling_progress.csv` is newer
+  on the LAPTOP (7 photos re-checked 8 Oct = `selesai`; the server still has `perlu dicek manual`, likely why v6 used 156 photos).
+* 33 `New image` photos (28 Sep 16h) put in the label queue: copied to `raw/`, v4 drafts (`box_v4s.pt`, 1280, cpu) via
+  `pred_to_spec.py` (note SEDANG DIKERJAKAN, out of training), expiry proposals (19 dates), batch
+  `labeling\batches\baru_20260928_16h` with `REVIEW.md`. They are one-box close-ups (~40 boxes, not ~400); v4 drafts include the
+  drink bottle and monitor as boxes. Seed set unchanged (51 photos), the 33 are pool "sedang dikerjakan".
+* Fixes: `labeling/tools/auto_expiry.py` crashed on a photo with 0 boxes and on very thin tiles; `export_datasets.seed_state`
+  let tool-reviewed labels into training without the expiry review (now same rule as specs; verified on simulated input).
+  `code/src/box_expiry.py` got the server's hourglass fix (`82029-03-24` was dropped, so a dated Sled Bag request could not PICK);
+  2 new tests, 270 pass. The live pipeline is not re-tested with the camera.
+* Open (needs the owner's OK, it changes the server): copy to the server the laptop `labeling_progress.csv`, the 33 photos' specs /
+  expiry files / `labels_final_obb` / `labels_auto`, the fixed tools, `server_scripts/` and `compare_server.py`.
 * Missing locally, not needed by the box pipeline: `data/test_assets/synthetic_shelf.mp4` (`scripts/generate_test_assets.py`),
   `data/book_db.sqlite`. The 3-class model and v5/v6 are only on the server.
-* Commit: all work since 8 Oct committed on branch `claude/sync-20261014` (not pushed).
+* Commit: all work since 8 Oct committed on branch `claude/sync-20261014` in both repos (not pushed). The labelling repo got a
+  whitelist `.gitignore` first (it had none; `git add -A` would have added the photos).
 
 ## 2026-10-14 (later) - Claude Code (laptop): folders, English, server comparison
 

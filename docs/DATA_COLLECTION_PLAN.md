@@ -10,8 +10,8 @@ and an expiry-label finder for identical boxes (Sled Bag).
 | Labelled photos (`labels_final_obb`) | **163** (104 from 23 Sep, 54 from 28 Sep, 5 from 1 Oct) | phone photos of boxes in cardboard, not the shelf |
 | `box` instances | 1,826 | |
 | `size_label` instances | 2,277 | |
-| `expiry_label` instances | 719, in 76 photos only | 87 photos still in the review pool |
-| Unlabelled photos already on disk | **33** (`New image\`, 28 Sep 16h) | never entered the dataset |
+| `expiry_label` instances | 443 in the 51 reviewed photos (1,444 proposals in all 163) | 112 photos still `auto` after the server tightened the labels (12 Oct) |
+| Unlabelled photos already on disk | **33** (`New image\`, 28 Sep 16h) | close-ups of ONE box each (~40 boxes in total); in `raw/` with v4 drafts since 14 Oct, batch `baru_20260928_16h` |
 | D455 frames from the real shelf | **0** | the biggest gap: every test runs on D455 images |
 
 Measured weak spots that more data should fix:
@@ -29,8 +29,8 @@ number of **different conditions** is what limits us, not the number of frames.
 | --- | --- | --- | --- |
 | A. D455 shelf sessions (menu D) | **400** selected frames | 8,000 box, 9,000 size_label | deployment camera and distance |
 | B. D455 close-up of labels (Sled Bag dates, REF, barcode) | **120** | 400 expiry_label, REF areas | dated requests and second source |
-| C. The 33 unlabelled phone photos | 33 | ~400 box | already taken, free gain |
-| D. Finish the 87 expiry-pool photos | 87 | ~700 expiry_label | the 3-class model was trained on 76 photos |
+| C. The 33 unlabelled phone photos | 33 | ~40 box, 19 dates | already taken; one box per photo, so close-up data (like B) plus bottle / monitor as background; drafts ready |
+| D. Finish the 112 expiry-pool photos | 112 | ~1,000 expiry_label | the 3-class model was trained on 76 photos; 26 were reopened on 12 Oct |
 | E. Negatives: shelf without boxes, other shelves, hands only | **30** (5-10 % of A) | 0 | fewer false boxes (monitor, shelf post were counted) |
 | F. New brands (only if the team decides to add them) | 40 per brand | | e.g. CHROMA, SeQuent (see `results/demo_20261012/foto_baru`) |
 

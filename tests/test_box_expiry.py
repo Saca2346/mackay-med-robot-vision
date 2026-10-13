@@ -16,6 +16,8 @@ D = dt.date
     ("2O29-O4-26", [D(2029, 4, 26)]),            # O read instead of 0
     ("2029-03-1O 2029-03-10", [D(2029, 3, 10)]),  # same date twice -> once
     ("2029 03 24", [D(2029, 3, 24)]),             # dashes lost
+    ("82029-09-21", [D(2029, 9, 21)]),            # hourglass icon read as a leading "8"
+    ("Permanent Sled Bag 82029-03-24", [D(2029, 3, 24)]),
 ])
 def test_find_dates_reads_printed_date(text, want):
     assert find_dates(text) == want
