@@ -15,10 +15,10 @@
 # LEVEL 0 (jalan HARI INI, tanpa training apa pun): model placeholder yang sudah ada
 # (models/yolo26n.onnx) adalah YOLO26n COCO-pretrained, dan "book" SUDAH JADI SALAH SATU
 # dari 80 kelas COCO bawaannya (lihat src/pipeline.py, COCO_CLASSES). Artinya perintah di atas
-# SUDAH bisa mendeteksi buku generik sekarang juga -- lihat docs/DATASET_SOURCES_BUKU.md bagian
+# SUDAH bisa mendeteksi buku generik sekarang juga -- lihat docs/archive_id/DATASET_SOURCES_BUKU.md bagian
 # "Level 0" untuk buktinya. model.onnx_path di bawah sengaja masih menunjuk ke model COCO yang
 # sama; ganti ke models/book_yolo26n.onnx (Level 1) hanya setelah Anda melatih model khusus buku
-# sendiri (docs/DATASET_SOURCES_BUKU.md + notebooks/train_book_on_kaggle.ipynb).
+# sendiri (docs/archive_id/DATASET_SOURCES_BUKU.md + notebooks/train_book_on_kaggle.ipynb).
 
 model:
   onnx_path: "models/yolo26n.onnx"   # Level 0: COCO-pretrained, kelas "book" sudah tersedia.

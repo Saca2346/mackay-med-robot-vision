@@ -10,6 +10,28 @@ dilihat di desktop Remmina. Dasar: `docs/BOX_PIPELINE.md` bagian 3b dan checklis
 - Setiap blok perintah diberi label tempat menjalankannya: **laptop cmd** atau **server (terminal Remmina)**.
 - Kamera hanya bisa dipakai satu program. Tutup `test_webcam_box.py` di laptop sebelum `stream_webcam.py`.
 - Jangan menjalankan tes berat di laptop selama uji berlangsung (laptop pernah melambat karena panas).
+- Progres uji dicatat di `docs/CHECKLIST_UJI_LIVE.md` (centang per tahap, hasil, dan nama file bukti).
+
+### Kamera: Intel RealSense D455 (dipakai sejak 08-10)
+
+Kamera tetap di laptop. `stream_webcam.py` otomatis memakai RealSense karena `camera.backend: "realsense"` di
+`config/box_pipeline_config.yaml`. Perintah tunnel dan server **tidak berubah**. Yang berbeda:
+
+| Hal | Nilai | Catatan |
+| --- | --- | --- |
+| Port USB | harus **USB 3.x** | cek: `venv\Scripts\python.exe scripts\cek_usb_realsense.py --detik 10`. Kalau `2.1`: tidak ada frame, jangan lanjut |
+| Resolusi | 1280x800 @ 30 fps | D455 tidak punya warna 1080p; program memilihnya sendiri dan mencetak `[kamera] RealSense tidak punya ...` (normal) |
+| Beban jaringan | sekitar 10 Mbit/s | lebih ringan dari w300 (sekitar 25 Mbit/s) |
+| Sudut pandang | lebar (sekitar 90 derajat) | 20 kotak dalam satu frame = sekitar 26 piksel per kotak = teks tidak terbaca (diuji 08-10: 0 AMBIL dalam 145 detik) |
+| Kerangka yang disarankan | lebar kotak >= 28 piksel, idealnya >= 40 (menu D mengukurnya) | `tajam` di HUD tinggi saja tidak cukup; yang menentukan jumlah piksel per huruf |
+| Program lain | tutup RealSense Viewer dan pratinjau lokal (`q`) | kamera hanya bisa dipakai satu program |
+
+**Dua kerangka, dua tujuan.** Hitung kotak (Tahap 3) butuh seluruh rak dalam frame; membaca teks (Tahap 4) butuh kamera
+lebih dekat sehingga hanya sebagian rak terlihat. Jadi:
+- Tahap 3: kamera agak jauh, `--expected 20`, tujuannya jumlah kotak.
+- Tahap 4: kamera dekat, geser kamera ke bagian rak yang berisi kotak target. Tetap pakai `--expected 20`: kalau yang
+  terlihat kurang dari 20, sistem tidak pernah menyimpulkan TIDAK ADA (tetap MENCARI), jadi aman.
+- Area rak (tombol `a`) berlaku untuk **satu** kerangka. Setiap kamera dipindah, tekan `a` lagi.
 
 ---
 
@@ -97,9 +119,11 @@ Untuk tiap nomor di tabel 20 uji (nomor 1-16), jalankan satu permintaan. Pakai w
 
 **Server (terminal Remmina):**
 ```bash
-python scripts/uji_checklist.py --kamera 5 --kamera-arg --config config/box_pipeline_config_server.yaml --source http://127.0.0.1:18090/video.mjpg --expected 20 --record results/uji_live_05.mp4
+python scripts/uji_checklist.py --kamera 5 --kamera-arg --config config/box_pipeline_config_server.yaml --source http://127.0.0.1:18090/video.mjpg --expected 20 --record results/uji_live_05.mp4 --debug-readings results/bacaan_live_05.csv
 ```
-Ganti angka `5` dan nama rekaman untuk nomor lain. Tekan `q` di jendela untuk berhenti.
+Ganti angka `5` dan nama dua file (rekaman dan bacaan) untuk nomor lain. Tekan `q` di jendela untuk berhenti.
+`--debug-readings` menyimpan teks mentah OCR per kotak: itu bukti "detail kotak terbaca" untuk laporan, dan alat untuk
+menganalisis kotak yang gagal. **Simpan semua uji apa adanya, termasuk yang gagal.**
 
 **Urutan prioritas** (kotak yang mirip dan paling berisiko dulu):
 1. #4, #5, #6: tiga accuforce.
@@ -157,8 +181,10 @@ Syarat lulus: alur berjalan dua kali berturut-turut tanpa intervensi, dan rekama
 **Server (terminal Remmina):**
 ```bash
 ls -la results/ | tail -20
-tar czf hasil_uji_live.tgz results/uji_live_*.mp4 results/demo_log.jsonl results/uji_checklist_*.csv
+tar czf hasil_uji_live.tgz results/uji_live_*.mp4 results/uji_live_*.mp4.times.csv results/bacaan_live_*.csv results/verify_log.csv results/screens/peristiwa results/demo_log.jsonl results/uji_checklist_*.csv
 ```
+Isi arsip ini = bahan slide laporan: rekaman (`.mp4`), teks terbaca (`bacaan_*.csv`), baris sukses/gagal (`verify_log.csv`),
+dan foto saat AMBIL / BATAL (`screens/peristiwa`).
 Kirim `hasil_uji_live.tgz` ke laptop dengan `scp`, dan kirim ringkasan ini ke Claude: nomor yang gagal, nomor yang
 PERLU KONFIRMASI padahal kotaknya benar, jumlah kotak terhitung, dan angka `masuk` / `tampil` dari HUD.
 

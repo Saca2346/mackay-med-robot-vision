@@ -36,11 +36,19 @@ class Request:
     product: str
     diameter: float | None = None          # None untuk barang tanpa ukuran (mis. "permanent sled bag")
     length: float | None = None
+    expiry: dt.date | None = None          # one specific box among identical ones (e.g. 4 Sled Bags); None = FEFO
 
     def __str__(self) -> str:
+        exp = f" exp {self.expiry.isoformat()}" if self.expiry else ""
         if self.diameter is None:
-            return self.product
-        return f"{self.product} {self.diameter:g} x {self.length:g} mm"
+            return self.product + exp
+        return f"{self.product} {self.diameter:g} x {self.length:g} mm{exp}"
+
+
+# A request for one specific expiry date: MATCH (and so PICK) only when the printed date of the box was read and is that
+# date (src/box_expiry.trusted_expiry, strict). Set by the caller for the current request; None = no date required.
+REQUIRED_EXPIRY: dt.date | None = None
+_REQ_DATE = re.compile(r"\b(20\d\d)[-/.](\d{1,2})[-/.](\d{1,2})\b")   # date in a REQUEST (not the OCR _DATE below)
 
 
 PRODUCTS = ["angiolite", "xperience pro", "essential pro", "accuforce", "ultimaster nagomi", "ryurei",
@@ -56,7 +64,8 @@ ALIASES = {"nagomi": "ultimaster nagomi", "ultimaster": "ultimaster nagomi", "xp
            "conqueror": "conqueror nc pro", "emerge": "nc emerge"}
 _FILLER = {"pilih", "ambil", "ambilkan", "cari", "carikan", "tolong", "minta", "saya", "yang", "dengan", "dan", "kotak",
            "box", "stent", "balon", "balloon", "kateter", "catheter", "ukuran", "size", "mm", "milimeter", "merek",
-           "merk", "brand", "produk", "untuk", "the", "please", "pick", "select", "get", "a", "of"}
+           "merk", "brand", "produk", "untuk", "the", "please", "pick", "select", "get", "a", "of",
+           "exp", "expiry", "expired", "ed", "kedaluwarsa", "kadaluwarsa", "tanggal", "date"}
 _D_WORDS = r"(?:(?<![a-z])(?:diameter|diam|dia|d)|ø|⌀)"
 _L_WORDS = r"(?:panjang|pjg|length|len|l|p)"
 
@@ -69,7 +78,22 @@ def parse_request(s: str, catalog: list[str] | None = None) -> Request:
     """Permintaan dalam kalimat biasa -> Request. Contoh yang dipahami:
       "angiolite,2.5,29"   "angiolite 2.5x29"   "pilih ivascular angiolite diameter 4 mm panjang 19"
       "terumo accuforce 2,75 x 20"   "nagomi 3/24"   "angiolite Ø4 L19"   "permanent sled bag" (tanpa ukuran)
-    Merek boleh ditulis, tapi harus cocok dengan produknya. Angka tanpa kata kunci: pertama diameter, kedua panjang."""
+    Merek boleh ditulis, tapi harus cocok dengan produknya. Angka tanpa kata kunci: pertama diameter, kedua panjang.
+    A date YYYY-MM-DD anywhere asks for that one box: "permanent sled bag 2029-03-24", "angiolite 2.5 x 29 exp 2028-07-31"."""
+    req_expiry = None
+    m = _REQ_DATE.search(s)
+    if m:
+        try:
+            req_expiry = dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            raise ValueError(f"Not a valid date in {s!r}: {m.group(0)} (use YYYY-MM-DD, e.g. 2029-03-24)") from None
+        s = (s[:m.start()] + " " + s[m.end():]).strip()
+    req = _parse_request(s, catalog)
+    req.expiry = req_expiry
+    return req
+
+
+def _parse_request(s: str, catalog: list[str] | None = None) -> Request:
     names = list(dict.fromkeys([_norm_words(c) for c in (catalog or [])] + PRODUCTS))
     parts = [p.strip() for p in s.split(",")]
     if len(parts) == 3 and all(re.fullmatch(r"\d+(?:\.\d+)?", p) for p in parts[1:]):   # format lama
@@ -112,25 +136,26 @@ def parse_request(s: str, catalog: list[str] | None = None) -> Request:
                 if d <= _tolerance(cand) and (best is None or (d, -len(target)) < best):
                     best, product = (d, -len(target)), ALIASES.get(cand, cand)
     if product is None:
-        raise ValueError(f"Produk tidak dikenali dalam {s!r} (terbaca: {phrase!r}). Produk yang dikenal: "
+        raise ValueError(f"Product not recognised in {s!r} (read: {phrase!r}). Known products: "
                          + ", ".join(names))
     if brand and brand_of(product) and brand_of(product) != brand:
-        raise ValueError(f"{product} bukan produk {brand} (produk {brand}: {', '.join(sorted(BRANDS[brand]))})")
+        raise ValueError(f"{product} is not a {brand} product ({brand} products: {', '.join(sorted(BRANDS[brand]))})")
     if product in NO_SIZE:
         return Request(product)
     if dia is None or length is None:
-        raise ValueError(f"Ukuran {product} belum lengkap dalam {s!r}: tulis diameter DAN panjang, "
-                         f"mis. \"{product} diameter 2.5 panjang 29\"")
+        raise ValueError(f"Size of {product} incomplete in {s!r}: give diameter AND length, "
+                         f"e.g. \"{product} 2.5 x 29\" or \"{product} diameter 2.5 length 29\"")
     if not (1.0 <= dia <= 10.0) or not (6.0 <= length <= 200.0):
-        raise ValueError(f"Ukuran tidak masuk akal: diameter {dia:g} mm, panjang {length:g} mm "
-                         "(diameter 1-10 mm, panjang 6-200 mm; mungkin tertukar?)")
+        raise ValueError(f"Implausible size: diameter {dia:g} mm, length {length:g} mm "
+                         "(diameter 1-10 mm, length 6-200 mm; swapped?)")
     return Request(product, dia, length)
 
 
 def describe_request(req: Request) -> str:
     b = brand_of(req.product)
     name = f"{req.product}" + (f" ({b})" if b else "")
-    return name if req.diameter is None else f"{name}, diameter {req.diameter:g} mm, panjang {req.length:g} mm"
+    exp = f", expiry {req.expiry.isoformat()} (this box only)" if getattr(req, "expiry", None) else ""
+    return (name if req.diameter is None else f"{name}, diameter {req.diameter:g} mm, length {req.length:g} mm") + exp
 
 
 # ------------------------------------------------------------------ parsing teks
@@ -408,6 +433,8 @@ class Evidence:
     too_far: bool = False                               # kotak terlalu kecil di gambar untuk dibaca
     support: tuple | None = None                        # (atom bukti, bertentangan?) dari support(), diisi read_evidence
     spine: str = ""                                     # teks OCR seluruh punggung (hanya untuk diagnosa / log bacaan)
+    dates: tuple = ()                                   # tanggal kedaluwarsa tercetak di punggung (src/box_expiry.py);
+                                                        #   BUKAN bukti MATCH, hanya untuk FEFO antar kotak kembar
 
 
 def _matches(product, diameter, length, req: Request) -> bool:
@@ -429,40 +456,40 @@ def decide_multi(ev: Evidence, req: Request, catalog=None, today: dt.date | None
     """
     today = today or dt.date.today()
     if ev.too_far:
-        return CONFIRM, "terlalu jauh - dekatkan kamera", EMPTY
+        return CONFIRM, "too far - move the camera closer", EMPTY
     for c in ev.codes:
         if c.expiry is not None and c.expiry < today:
-            return EXPIRED, f"kedaluwarsa {c.expiry.isoformat()} (GTIN {c.gtin})", ("expired", c.gtin)
+            return EXPIRED, f"expired {c.expiry.isoformat()} (GTIN {c.gtin})", ("expired", c.gtin)
     gtins = sorted({c.gtin for c in ev.codes})
     if len(gtins) > 1:
-        return CONFIRM, "lebih dari satu GTIN di kotak ini: " + ", ".join(gtins), None
+        return CONFIRM, "more than one GTIN on this box: " + ", ".join(gtins), None
     agree, contra, notes, partial = [], [], [], False
     for c in ev.codes:
         e = catalog.get(c.gtin) if catalog is not None else None
         if e is None:
-            notes.append(f"GTIN {c.gtin} belum ada di katalog")
+            notes.append(f"GTIN {c.gtin} not in the catalog yet")
             continue
         if not e.verified and not trust_unverified:
-            notes.append(f"GTIN {c.gtin} ({e}) belum diverifikasi di katalog")
+            notes.append(f"GTIN {c.gtin} ({e}) not verified in the catalog")
             continue
-        src, w = ("barcode", W_BARCODE) if c.source == "barcode" else ("teks GTIN", W_GTIN_TEXT)
+        src, w = ("barcode", W_BARCODE) if c.source == "barcode" else ("GTIN text", W_GTIN_TEXT)
         (agree if _matches(e.product, e.diameter_mm, e.length_mm, req) else contra).append((src, w, str(e)))
     t = ev.text
     if t is not None:
         bad = []
         if t.product and t.product_ok and t.product != req.product:
-            bad.append(f"produk {t.product}")
+            bad.append(f"product {t.product}")
         if req.diameter is not None:
             if t.diameter is not None and t.diameter_ok and not _same(t.diameter, req.diameter):
                 bad.append(f"diameter {t.diameter:g}")
             if t.length is not None and t.length_ok and not _same(t.length, req.length):
-                bad.append(f"panjang {t.length:g}")
+                bad.append(f"length {t.length:g}")
         d_ok = t.diameter_ok or (req.diameter is not None and t.diameter_hint is not None
                                  and _same(t.diameter_hint, req.diameter))       # petunjuk hanya menyepakati
         if bad:
-            contra.append(("teks", W_TEXT, ", ".join(bad)))
+            contra.append(("text", W_TEXT, ", ".join(bad)))
         elif t.product_ok and (req.diameter is None or (d_ok and t.length_ok)):
-            agree.append(("teks", W_TEXT, t.text[:40]))
+            agree.append(("text", W_TEXT, t.text[:40]))
         elif t.product_ok or t.diameter_ok or t.length_ok:
             partial = True
     for r in ev.refs:
@@ -470,7 +497,7 @@ def decide_multi(ev: Evidence, req: Request, catalog=None, today: dt.date | None
         (agree if _matches(r.product, r.diameter, r.length, req) else contra).append(("REF", W_REF, detail))
 
     if agree and contra:
-        return CONFIRM, ("bukti bertentangan: " + " | ".join(f"{s} {d}" for s, _, d in agree + contra)), None
+        return CONFIRM, ("contradicting evidence: " + " | ".join(f"{s} {d}" for s, _, d in agree + contra)), None
     if contra:
         return IGNORED, "; ".join(f"{s}: {d}" for s, _, d in contra), None
     score = sum(w for _, w, _ in agree)
@@ -478,11 +505,11 @@ def decide_multi(ev: Evidence, req: Request, catalog=None, today: dt.date | None
     if score >= min_score:
         return MATCH, " + ".join(s for s, _, _ in agree), key
     if agree or partial:
-        got = " + ".join(s for s, _, _ in agree) or "sebagian teks"
-        return CANDIDATE, f"baru {got} cocok - perlu bukti kedua (dekatkan / tunjukkan barcode)", key
+        got = " + ".join(s for s, _, _ in agree) or "partial text"
+        return CANDIDATE, f"only {got} matches - needs a second source (move closer / show the barcode)", key
     if notes:
         return CONFIRM, "; ".join(notes), None
-    return CONFIRM, "belum terbaca", EMPTY
+    return CONFIRM, "not read yet", EMPTY
 
 
 COMBINE_WINDOW = 4       # bacaan berisi terakhir yang buktinya boleh digabung (TrackState.combined_match)
@@ -567,6 +594,8 @@ class TrackState:
     hint_frame: int = -1000            # frame terakhir kemiripan dihitung
     reads: int = 0                     # jumlah bacaan yang pernah masuk lewat add() (penanda "bacaan sesudah saat X")
     evs: deque = field(default_factory=lambda: deque(maxlen=5))       # Evidence tiap bacaan, sejajar history
+    dates: deque = field(default_factory=lambda: deque(maxlen=5))     # tanggal tercetak tiap bacaan (tuple, bisa kosong)
+    expiry_src: str = ""               # asal `expiry`: "barcode" atau "teks" (tanggal tercetak, src/box_expiry.py)
 
     def mark_stale(self) -> None:
         """Nomor kotak diragukan: SEMUA bacaan lama dibuang (bisa jadi milik kotak lain) dan bacaan dari crop yang
@@ -575,6 +604,9 @@ class TrackState:
             self.history.clear()
             self.support.clear()
             self.evs.clear()
+            self.dates.clear()
+            if self.expiry_src == "text":                # tanggal dari teks milik kotak yang mungkin lain
+                self.expiry, self.expiry_src = None, ""
             self.stale = True
             self.epoch += 1
 
@@ -586,6 +618,7 @@ class TrackState:
         self.history.append((decision, key))
         self.support.append(sup if sup is not None else (frozenset(), False))
         self.evs.append(ev)
+        self.dates.append(tuple(getattr(ev, "dates", ()) or ()))
         self.reads += 1
 
     def redecide(self, decide) -> bool:
@@ -630,8 +663,8 @@ class TrackState:
         rows = [s for (d, k), s in zip(self.history, self.support) if k != EMPTY][-(window or COMBINE_WINDOW):]
         atoms = frozenset().union(*[a for a, _ in rows]) if rows else frozenset()
         names = [n for n, ok in (("barcode", any(isinstance(a, tuple) and a[0] == "bc" for a in atoms)),
-                                 ("teks GTIN", any(isinstance(a, tuple) and a[0] == "gt" for a in atoms)),
-                                 ("teks", {"tp", "td", "tl"} <= atoms), ("REF", "ref" in atoms)) if ok]
+                                 ("GTIN text", any(isinstance(a, tuple) and a[0] == "gt" for a in atoms)),
+                                 ("text", {"tp", "td", "tl"} <= atoms), ("REF", "ref" in atoms)) if ok]
         return " + ".join(names)
 
     def stable(self, need: int) -> str:
@@ -656,14 +689,21 @@ class TrackState:
         last = info[-need:]
         decisions = {d for d, _ in last}
         if decisions == {MATCH} and len({k for _, k in last}) == 1:
-            return MATCH
+            return self._date_gate()
         if decisions == {IGNORED}:
             return IGNORED
         if self.combined_match(need):
-            return MATCH
+            return self._date_gate()
         if decisions <= {CANDIDATE, MATCH}:
             return CANDIDATE
         return CONFIRM
+
+    def _date_gate(self) -> str:
+        """Request for one specific date (REQUIRED_EXPIRY): the right product + size is not enough, the printed date
+        of THIS box must have been read and be that date. Otherwise it stays a candidate (never a PICK)."""
+        if REQUIRED_EXPIRY is not None and self.expiry != REQUIRED_EXPIRY:
+            return CANDIDATE
+        return MATCH
 
 
 def pick_fefo(states: dict, need: int):
@@ -882,7 +922,7 @@ class SimpleTracker:
                     self.by_column.append((tid, i, v))
                 else:
                     weak.add(tid)                    # pasangan lemah: bisa jadi kotak sebelah
-                    why[tid] = f"pasangan lemah IoU {v:.2f} ({_offsets(self.tracks[tid]['poly'], polys[i])})"
+                    why[tid] = f"weak pair IoU {v:.2f} ({_offsets(self.tracks[tid]['poly'], polys[i])})"
         # cadangan: kotak yang sama terdeteksi terpotong / lebih panjang (IoU turun, tapi satu hampir di dalam yang
         # lain). Hanya kalau pasangannya TIDAK ambigu, supaya bacaan tidak pernah pindah ke kotak sebelah.
         loose = [(tid, i) for (tid, i), v in iom.items()
@@ -893,7 +933,7 @@ class SimpleTracker:
                 used_t.add(tid)
                 used_i.add(i)
                 weak.add(tid)
-                why[tid] = f"cocok longgar IoM {iom[(tid, i)]:.2f} ({_offsets(self.tracks[tid]['poly'], polys[i])})"
+                why[tid] = f"loose match IoM {iom[(tid, i)]:.2f} ({_offsets(self.tracks[tid]['poly'], polys[i])})"
         for i, p in enumerate(polys):
             if ids[i] == -1:
                 ids[i] = self._next
@@ -908,7 +948,7 @@ class SimpleTracker:
             if t.pop("was_out", False) or ids[i] in weak:
                 t["out"] = 0
                 if t["state"].history or t["state"].pending:
-                    self.doubted.append((ids[i], why.get(ids[i], "masuk layar lagi")))
+                    self.doubted.append((ids[i], why.get(ids[i], "back on screen")))
                 t["state"].mark_stale()              # nomor kotak diragukan: bacaan lama tidak dipakai lagi
         self._update_still()
         for tid in list(self.tracks):

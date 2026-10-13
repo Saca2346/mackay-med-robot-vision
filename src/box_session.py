@@ -5,7 +5,7 @@ Alur penyeleksi SATU permintaan di rak (Tahap 2), di atas tracker + keputusan pe
                 0 kotak terus-menerus `empty_s` detik        -> RAK KOSONG (merah), pencarian tidak dilanjutkan
                 kotak terlihat stabil `count_s` detik        -> jumlah kotak di rak = median hitungan -> MENCARI
   2 MENCARI     setiap kotak dibaca (teks ukuran + kode REF + barcode) dan diputuskan per kotak:
-                ada kotak MATCH stabil yang terlihat         -> DITEMUKAN: hijau tebal "AMBIL", dikunci ke kotak itu
+                ada kotak MATCH stabil yang terlihat         -> DITEMUKAN: hijau tebal "PICK", dikunci ke kotak itu
                 SEMUA kotak yang TERLIHAT SEKARANG pasti bukan target (abu-abu) dan jumlahnya >= jumlah kotak di
                 rak                                          -> TIDAK ADA (merah)
                 (kotak di luar layar tidak ikut dihitung: posisinya hanya perkiraan dan bisa bergeser)
@@ -39,8 +39,8 @@ from src.box_geometry import frac_inside, inside_fraction, poly_iou, to_poly
 from src.box_verifier import (CANDIDATE, COMBINE_WINDOW, CONFIRM, EMPTY, EXPIRED, IGNORED, MATCH, READING,
                               _shift, combined_score, pick_fefo)
 
-CEK_RAK, RAK_KOSONG, MENCARI = "CEK RAK", "RAK KOSONG", "MENCARI"
-DITEMUKAN, PERLU_KONFIRMASI, TIDAK_ADA, SELESAI = "DITEMUKAN", "PERLU KONFIRMASI", "TIDAK ADA", "SELESAI"
+CEK_RAK, RAK_KOSONG, MENCARI = "CHECKING SHELF", "SHELF EMPTY", "SEARCHING"
+DITEMUKAN, PERLU_KONFIRMASI, TIDAK_ADA, SELESAI = "FOUND", "NEEDS CONFIRMATION", "NOT FOUND", "DONE"
 PHASE_COLOR = {CEK_RAK: "white", RAK_KOSONG: "red", MENCARI: "white", DITEMUKAN: "green",
                PERLU_KONFIRMASI: "yellow", TIDAK_ADA: "red", SELESAI: "green"}
 DONE = (IGNORED, EXPIRED)             # pasti tidak diambil
@@ -118,11 +118,11 @@ def on_shelf(tracker, ids, polys, tid) -> tuple[bool, str]:
     sempat dipilih lagi)."""
     t = tracker.tracks.get(tid, {})
     if t.get("still", 0) < STILL_MIN:
-        return False, "bergerak / dipegang"
+        return False, "moving / held in hand"
     p = polys[ids.index(tid)]
     for j, q in enumerate(polys):
         if ids[j] != tid and (frac_inside(q, p) > MAX_OVERLAP or frac_inside(p, q) > MAX_OVERLAP):
-            return False, "menutupi kotak lain (di depan rak?)"
+            return False, "covers another box (in front of the shelf?)"
     return True, ""
 
 
@@ -144,9 +144,9 @@ def pick_status(st) -> tuple[str, str]:
     atau "batal". Bertentangan (bukan target / kedaluwarsa / bukti bertentangan), nomor kotak diragukan, 2 bacaan
     berisi terakhir tidak ada yang MATCH, atau 3x berturut-turut tidak terbaca -> batal."""
     if st is None:
-        return "batal", "nomor kotak hilang"
+        return "batal", "box number lost"
     if st.stale:
-        return "batal", "nomor kotak diragukan - dibaca ulang"
+        return "batal", "box number in doubt - reading again"
     if len(st.support) == len(st.history) and st.history:
         return _pick_status_evidence(st)
     h = list(st.history)
@@ -158,16 +158,16 @@ def pick_status(st) -> tuple[str, str]:
         trailing += 1
     for d, k in info[-2:]:
         if d in (IGNORED, EXPIRED) or (d == CONFIRM and k != EMPTY):
-            return "batal", f"verifikasi berubah: {d}"
+            return "batal", f"verification changed: {d}"
     if trailing >= 3:
-        return "batal", "tidak terbaca berulang kali"
+        return "batal", "unreadable several times in a row"
     combined = st.combined_match(2)                 # bukti gabungan beberapa bacaan (TrackState.combined_match)
     if not (combined or any(d == MATCH for d, _ in info[-2:])):
-        return "batal", "bacaan tidak lagi cocok"
+        return "batal", "readings no longer match"
     if trailing:
-        return "tahan", "bacaan terakhir kosong - label tertutup / slot kosong?"
+        return "tahan", "last reading empty - label covered / slot empty?"
     solid = info and (info[-1][0] == MATCH or (combined and info[-1][0] == CANDIDATE))
-    return ("solid", "") if solid else ("tahan", "bacaan terakhir kurang lengkap")
+    return ("solid", "") if solid else ("tahan", "last reading incomplete")
 
 
 def _pick_status_evidence(st) -> tuple[str, str]:
@@ -184,22 +184,22 @@ def _pick_status_evidence(st) -> tuple[str, str]:
             break
         trailing += 1
     if any(d == EXPIRED for d, _, _ in rows):
-        return "batal", "kedaluwarsa"
+        return "batal", "expired"
     if trailing >= 3:
-        return "batal", "tidak terbaca berulang kali"
+        return "batal", "unreadable several times in a row"
     last = rows[-COMBINE_WINDOW:]
     bad = [i for i, (d, _, (_, c)) in enumerate(last) if c or d in (IGNORED, EXPIRED)]
     if len(bad) >= 2:
-        return "batal", f"{len(bad)} bacaan bertentangan"
+        return "batal", f"{len(bad)} contradicting readings"
     if len(bad) == 1:
         agree = [a for d, _, (a, c) in last[bad[0] + 1:] if a and not c]
         if len(agree) >= 2 and combined_score(frozenset().union(*agree))[0] >= 2:
             return "solid", ""                            # bantahan tunggal kalah oleh bacaan sesudahnya
-        return "tahan", "satu bacaan bertentangan - dibaca ulang"
+        return "tahan", "one contradicting reading - reading again"
     if trailing >= 2:
-        return "tahan", "bacaan terakhir kosong - label tertutup / slot kosong?"
+        return "tahan", "last reading empty - label covered / slot empty?"
     if not any(a for _, _, (a, _) in last) and not any(d == MATCH for d, _, _ in last):
-        return "tahan", "label belum terbaca lagi"
+        return "tahan", "label not read again yet"
     return "solid", ""
 
 
@@ -213,10 +213,10 @@ def relock_status(rows) -> tuple[str, str]:
     selalu membantah lewat ukurannya, dan bacaan "angiolite" saja tidak pernah cukup. Satu bantahan -> bacaan
     sesudahnya harus berskor >= 2; dua bantahan / kedaluwarsa -> batal; selain itu -> cek (tunggu, JANGAN diambil)."""
     if any(d == EXPIRED for d, _ in rows):
-        return "batal", "kedaluwarsa"
+        return "batal", "expired"
     bad = [i for i, (d, s) in enumerate(rows) if d == IGNORED or (s[1] if s is not None else d == CONFIRM)]
     if len(bad) >= 2:
-        return "batal", f"{len(bad)} bacaan ulang bertentangan"
+        return "batal", f"{len(bad)} recheck readings contradict"
     after = rows[bad[0] + 1:] if bad else rows
     if any(d == MATCH for d, _ in after):
         return "solid", ""
@@ -225,7 +225,7 @@ def relock_status(rows) -> tuple[str, str]:
         score, gtins = combined_score(frozenset().union(*parts))
         if score >= (2 if bad else 1) and len(gtins) <= 1:
             return "solid", ""
-    return "cek", "satu bacaan ulang bertentangan - dibaca lagi" if bad else "menunggu bacaan ulang yang lengkap"
+    return "cek", "one recheck reading contradicts - reading again" if bad else "waiting for a complete recheck reading"
 
 
 class SelectionSession:
@@ -266,7 +266,7 @@ class SelectionSession:
         self.watch = None                      # (slot, waktu diambil, nomor, gambar kotak) slot yang masih diawasi
         self._warned = None
         self.events: list[tuple] = []          # (waktu, peristiwa, nomor, alasan, TrackState|None)
-        self.message, self.detail, self.warning = "CEK RAK", "", ""
+        self.message, self.detail, self.warning = "CHECKING SHELF", "", ""
         self.stats: dict = {}
 
     # ------------------------------------------------------------------ luar
@@ -281,14 +281,14 @@ class SelectionSession:
     def request_again(self, n: int = 1, now: float = 0.0) -> None:
         """Permintaan yang sama sekali lagi. Kotak yang sedang AMBIL harus terverifikasi terambil dulu."""
         self.remaining += n
-        self._event(now, "PERMINTAAN LAGI", None, f"sisa {self.remaining}")
+        self._event(now, "REQUEST AGAIN", None, f"{self.remaining} left")
         if self.phase in (SELESAI, TIDAK_ADA, PERLU_KONFIRMASI):
             self.phase = MENCARI
 
     def lost(self, now: float) -> None:
         """Posisi kamera hilang terlalu lama (semua nomor kotak dilupakan): slot AMBIL tidak bisa diikuti lagi."""
         if self.phase == DITEMUKAN:
-            self._event(now, "BATAL AMBIL", self.pick, "posisi kamera hilang - diperiksa ulang")
+            self._event(now, "PICK CANCELLED", self.pick, "camera position lost - checking again")
             self._unlock()
         self.watch = None
 
@@ -314,12 +314,17 @@ class SelectionSession:
             self._check_shelf(now)
         if self.phase == DITEMUKAN:
             self._follow_pick(now, ids, polys, tracker, frame_size, still, frame)
+            if any(t not in tracker.tracks for t in ids):
+                # TAKEN dropped a box number that is still in view this frame (live test 10-10: the final check
+                # declared TAKEN while a neighbour held that number -> KeyError when searching on in the same frame)
+                keep = [i for i, t in enumerate(ids) if t in tracker.tracks]
+                ids, polys = [ids[i] for i in keep], [polys[i] for i in keep]
         if self.phase in (MENCARI, PERLU_KONFIRMASI, TIDAK_ADA):
             self._search(now, ids, polys, tracker, frame_size, still, frame)
         self._check_watch(now, polys, frame_size, frame)
         if self.phase == SELESAI:
-            self.message = f"SELESAI: {len(self.taken)} kotak {self.req} sudah diambil, slot kosong terverifikasi"
-            self.detail = "tekan r kalau ada permintaan yang sama lagi"
+            self.message = f"DONE: {len(self.taken)} x {self.req} taken, empty slot verified"
+            self.detail = "type the next request in the terminal and press Enter (or press r for the same item again)"
 
     # ------------------------------------------------------------------ 1 cek rak + hitung
     def _count(self, now, n, still, n_rest=None):
@@ -346,18 +351,18 @@ class SelectionSession:
     def _check_shelf(self, now):
         if self._ready:
             self.shelf_n = max(self.shelf_n, self._ready)
-            self._event(now, "JUMLAH KOTAK", None, f"{self.shelf_n} kotak di rak")
+            self._event(now, "BOX COUNT", None, f"{self.shelf_n} boxes on the shelf")
             self.phase = MENCARI
             return
         if self.zero_since is not None and now - self.zero_since >= self.empty_s:
             if self.phase != RAK_KOSONG:
-                self._event(now, RAK_KOSONG, None, "tidak ada kotak di rak")
+                self._event(now, RAK_KOSONG, None, "no boxes on the shelf")
             self.phase = RAK_KOSONG
-            self.message = "RAK KOSONG: tidak ada kotak - pencarian tidak dilanjutkan"
-            self.detail = "arahkan kamera ke rak berisi kotak dan tahan diam"
+            self.message = "SHELF EMPTY: no boxes - search stopped"
+            self.detail = "point the camera at a shelf with boxes and hold still"
             return
-        self.message = f"CEK RAK: menghitung kotak ({self.stats.get('visible', 0)} terlihat)"
-        self.detail = "arahkan kamera ke SELURUH rak dan tahan diam 2 detik"
+        self.message = f"CHECKING SHELF: counting boxes ({self.stats.get('visible', 0)} visible)"
+        self.detail = "point the camera at the WHOLE shelf and hold still for 2 s"
 
     # ------------------------------------------------------------------ 2 mencari
     def _search(self, now, ids, polys, tracker, frame_size, still, frame):
@@ -373,8 +378,8 @@ class SelectionSession:
         if match_all and not match_vis:
             tid = match_all[0]
             self.phase = MENCARI
-            self.message = f"MENCARI {self.req}: kotak cocok #{tid} tidak di rak ({shelf_ok[tid][1]})"
-            self.detail = "hanya kotak yang diam di rak yang dipilih - taruh kotak di rak / tahan kamera diam"
+            self.message = f"SEARCHING {self.req}: matching box #{tid} is not on the shelf ({shelf_ok[tid][1]})"
+            self.detail = "only a box resting on the shelf is picked - put the box on the shelf / hold the camera still"
             return
         if match_vis:
             self.pick = pick_fefo(match_vis, need)
@@ -387,7 +392,7 @@ class SelectionSession:
             self.recheck_t0 = self.hold_since = None
             self.adopted = None
             self.neigh = {t: to_poly(p).copy() for t, p in zip(ids, polys) if t != self.pick}
-            self._event(now, "AMBIL", self.pick, st.last_reason, st)
+            self._event(now, "PICK", self.pick, st.last_reason, st)
             self.phase = DITEMUKAN
             self._follow_pick(now, ids, polys, tracker, frame_size, still, frame)
             return
@@ -424,41 +429,41 @@ class SelectionSession:
         req = str(self.req)
         if n_vis and n_done == n_vis and n_vis >= need_n and not shortfall:
             if self.phase != TIDAK_ADA:
-                why = f"{n_done} kotak terlihat, semua bukan target" + (f" ({n_exp} kedaluwarsa)" if n_exp else "")
+                why = f"{n_done} boxes visible, none is the target" + (f" ({n_exp} expired)" if n_exp else "")
                 if n_taken:
-                    why += f"; {n_taken} sudah diambil"
+                    why += f"; {n_taken} already taken"
                 self._event(now, TIDAK_ADA, None, why)
             self.phase = TIDAK_ADA
-            self.message = (f"TIDAK ADA: {req} tidak ada " + ("lagi " if n_taken else "")
-                            + f"di rak ({n_done} kotak diperiksa, semua bukan target)")
-            self.detail = (f"{n_exp} kotak kedaluwarsa (ungu) tidak diambil" if n_exp else
-                           "kalau ada kotak baru di rak, arahkan kamera ke sana")
+            self.message = (f"NOT FOUND: no " + ("more " if n_taken else "") + f"{req} on the shelf "
+                            + f"({n_done} boxes checked, none is the target)")
+            self.detail = (f"{n_exp} expired boxes (purple) are not picked" if n_exp else
+                           "if a new box is put on the shelf, point the camera at it")
         elif match_out:
             self.phase = MENCARI
-            self.message = f"MENCARI {req}: kotak cocok {tags(match_out)} baru saja keluar layar"
-            self.detail = "arahkan kamera ke kotak itu dan tahan diam (dibaca ulang sebelum AMBIL)"
+            self.message = f"SEARCHING {req}: matching box {tags(match_out)} just left the screen"
+            self.detail = "point the camera at that box and hold still (it is read again before PICK)"
         elif n_vis and not kinds["reading"]:
             self.phase = PERLU_KONFIRMASI
             parts = []
             if kinds["candidate"]:
-                parts.append(f"{tags(kinds['candidate'])} baru 1 bukti cocok")
+                parts.append(f"{tags(kinds['candidate'])} only 1 matching source")
             if kinds["confirm"]:
-                parts.append(f"{tags(kinds['confirm'])} belum pasti")
+                parts.append(f"{tags(kinds['confirm'])} not certain")
             if shortfall:
-                parts.append(f"terdeteksi {self.shelf_n} dari {self.expected} kotak")
+                parts.append(f"{self.shelf_n} of {self.expected} boxes detected")
             elif n_vis < need_n:
-                parts.append(f"baru {n_vis} dari {need_n} kotak terlihat")
-            self.message = f"PERLU KONFIRMASI {req}: " + ("; ".join(parts) or "belum pasti")
+                parts.append(f"only {n_vis} of {need_n} boxes visible")
+            self.message = f"NEEDS CONFIRMATION {req}: " + ("; ".join(parts) or "not certain")
             if kinds["candidate"] or kinds["confirm"]:
-                self.detail = "dekatkan kamera ke kotak itu / tunjukkan barcode - sistem tidak menebak 'tidak ada'"
+                self.detail = "move the camera closer to that box / show its barcode - the system never guesses 'not found'"
             else:
-                self.detail = "mundurkan kamera sampai SELURUH rak terlihat, tahan diam"
+                self.detail = "move the camera back until the WHOLE shelf is visible, hold still"
         else:
             self.phase = MENCARI
-            self.message = (f"MENCARI {req}: {n_done} bukan target, {len(kinds['reading'])} sedang dibaca"
-                            + (f", {len(kinds['confirm'])} ragu" if kinds["confirm"] else "")
-                            + f" | {max(self.shelf_n - n_taken, 0)} kotak di rak")
-            self.detail = ("arahkan kamera ke rak" if not n_vis else "arahkan kotak ke tengah layar dan tahan diam")
+            self.message = (f"SEARCHING {req}: {n_done} not the target, {len(kinds['reading'])} being read"
+                            + (f", {len(kinds['confirm'])} unsure" if kinds["confirm"] else "")
+                            + f" | {max(self.shelf_n - n_taken, 0)} boxes on the shelf")
+            self.detail = ("point the camera at the shelf" if not n_vis else "bring the box to the centre of the screen and hold still")
 
     # ------------------------------------------------------------------ 3 kotak AMBIL
     def _follow_pick(self, now, ids, polys, tracker, frame_size, still, frame):
@@ -470,15 +475,18 @@ class SelectionSession:
             # Kunci TIDAK langsung dibatalkan (dulu: BATAL AMBIL tepat saat perawat mengambil kotak itu, lalu
             # TERAMBIL tidak pernah tercatat); kotak di slot ini dipastikan ulang dulu, JANGAN diambil robot.
             self.pick_epoch = st.epoch
-            self._recheck(now, tid, st, "nomor kotak diragukan - dipastikan ulang")
+            self._recheck(now, tid, st, "box number in doubt - reconfirming")
         if self.recheck_t0 is not None and now - self.recheck_t0 >= self.recheck_max_s \
                 and self.gone_since is None and self.hold_since is None:
             # (slot sudah terlihat kosong dan sedang dipastikan terambil: batasnya gone_s / hold_s sendiri; replay
             # uji_01 - kotak diambil 6 s setelah cek ulang mulai, batas 20 s memotong tahap itu -> BATAL, bukan TERAMBIL)
             # batas total, termasuk saat kotak tidak di slotnya (uji 30-09 14:04: dua deteksi bergantian di slot
             # kosong, nomor diambil alih bolak-balik dan batas waktu di-reset terus -> macet 60 s sampai uji selesai)
-            self._event(now, "BATAL AMBIL", tid, f"tidak terpastikan ulang dalam {self.recheck_max_s:g} s", st)
-            self._unlock()
+            # Final check (live test 09-10 17:31: the box WAS taken, the neighbour leaned into its slot, and the pick
+            # was cancelled instead of TAKEN): moved or taken? Target still visible anywhere -> moved / unsure ->
+            # cancel and search again. Target nowhere, and the slot no longer looks like the picked box -> TAKEN.
+            self._cancel_or_taken(now, tid, st, tracker, ids, frame, still,
+                                  f"not reconfirmed within {self.recheck_max_s:g} s")
             return
         at = poly_iou(polys[ids.index(tid)], self.slot) if tid in ids else 0.0
         pulled = at >= 0.2 and moving_on_shelf(tracker, tid, polys[ids.index(tid)], self._shelf)
@@ -490,13 +498,13 @@ class SelectionSession:
                 waited = now - self.recheck_since
                 if status == "solid":
                     self.adopted = None
-                    self._event(now, "AMBIL DIPASTIKAN", tid,
-                                "dipastikan ulang: " + (st.combined_sources() or st.last_reason), st)
+                    self._event(now, "PICK CONFIRMED", tid,
+                                "reconfirmed: " + (st.combined_sources() or st.last_reason), st)
                     self.recheck_since = self.recheck_from = self.recheck_t0 = self.hold_since = None
                     self.box_patch = None                # gambar kotak diambil lagi dari kotak yang baru dipastikan
                 elif status == "cek":
                     if waited >= self.relock_s:
-                        status, why = "batal", f"tidak terpastikan ulang dalam {self.relock_s:g} s ({why})"
+                        status, why = "batal", f"not reconfirmed within {self.relock_s:g} s ({why})"
                     else:
                         why = f"{why}, {waited:.0f}/{self.relock_s:g} s"
             else:
@@ -508,13 +516,12 @@ class SelectionSession:
                 # tidak terlihat di mana pun -> sudah terambil (dulu: BATAL AMBIL, TERAMBIL tidak tercatat).
                 old, old_st, _ = self.adopted
                 if self._settle_taken(now, ids, polys, tracker, old, old_st, {tid}, frame_size, watch=False,
-                                      reason=f"kotak tidak terlihat lagi; slotnya kini diisi kotak lain #{tid} "
-                                             "(bukan target)"):
+                                      reason=f"box no longer visible; its slot is now filled by another box #{tid} "
+                                             "(not the target)"):
                     return
-                status, why = "cek", "memastikan kotak tidak dipindah ke tempat lain di rak"
+                status, why = "cek", "making sure the box was not moved elsewhere on the shelf"
             if status == "batal":
-                self._event(now, "BATAL AMBIL", tid, why, st)
-                self._unlock()
+                self._cancel_or_taken(now, tid, st, tracker, ids, frame, still, why)
                 return
             differs = False
             if status == "solid" and still and frame is not None and self.box_patch is not None:
@@ -524,7 +531,7 @@ class SelectionSession:
                 differs = ncc(slot_patch(frame, self.slot), self.box_patch) < SAME_BOX_NCC
                 self.look_off = self.look_off + 1 if differs else 0
                 if self.look_off >= LOOK_OFF_FRAMES:
-                    status, why = "cek", "kotak di slot tampak berbeda dari saat dipilih"
+                    status, why = "cek", "the box in the slot looks different from when it was picked"
                     self._recheck(now, tid, st, why, from_reads=st.reads)
                     self.look_off = 0
             self.solid = status == "solid"
@@ -539,19 +546,19 @@ class SelectionSession:
             others = [t for t in ids if t != tid]
             sure = sum(1 for t in others if tracker.tracks[t]["state"].stable(self.need) in DONE)
             if self.solid:
-                self.message = f"DITEMUKAN: AMBIL #{tid} {req}" + (f" ({st.last_reason})" if st.last_reason else "")
+                self.message = f"FOUND: PICK #{tid} {req}" + (f" ({st.last_reason})" if st.last_reason else "")
             else:
-                self.message = f"DITEMUKAN: #{tid} {req} - memeriksa ulang, JANGAN diambil dulu ({why})"
-            self.detail = ((f"{len(others)} kotak lain tidak diambil ({sure} pasti bukan target)" if others else "")
-                           + (f" | sisa permintaan {self.remaining}" if self.remaining > 1 else ""))
+                self.message = f"FOUND: #{tid} {req} - rechecking, do NOT take it yet ({why})"
+            self.detail = ((f"{len(others)} other boxes are not picked ({sure} certainly not the target)" if others else "")
+                           + (f" | {self.remaining} still requested" if self.remaining > 1 else ""))
             return
         if self.recheck_since is not None:
             self.recheck_since = now                     # batas waktu pastikan-ulang hanya berjalan saat kotak di slot
         if at >= 0.2:                                    # kotak AMBIL sedang ditarik keluar dari slotnya
             self.pulling = True
             self.gone_since = self.occupied_since = None
-            self.message = f"DITEMUKAN: #{tid} sedang diambil"
-            self.detail = "setelah kotak keluar, tahan kamera diam ke arah slotnya"
+            self.message = f"FOUND: #{tid} is being taken"
+            self.detail = "after the box is out, hold the camera still on its slot"
             return
         # kotak AMBIL tidak lagi di slotnya: sudah diambil, tertutup tangan, detektor sesaat gagal, nomor berganti?
         visible = frame_size is not None and inside_fraction(self.slot, frame_size) >= 0.9
@@ -559,8 +566,8 @@ class SelectionSession:
         inside = [(ids[i], p) for i, p in enumerate(polys) if ids[i] != tid and cover(self.slot, p) >= 0.6]
         if inside and all(moving_on_shelf(tracker, t, p, self._shelf) for t, p in inside) and self.pulling:
             self.gone_since = self.occupied_since = None       # kotak yang sedang ditarik (nomornya berganti)
-            self.message = f"DITEMUKAN: #{tid} sedang diambil"
-            self.detail = "setelah kotak keluar, tahan kamera diam ke arah slotnya"
+            self.message = f"FOUND: #{tid} is being taken"
+            self.detail = "after the box is out, hold the camera still on its slot"
             return
         if self.adopted is None and len(inside) == 1 and tid not in ids \
                 and not moving_on_shelf(tracker, *inside[0], self._shelf):
@@ -570,7 +577,7 @@ class SelectionSession:
             # terus berganti (uji 30-09 14:04, #262 <-> #356 puluhan kali) jatuh ke "ada kotak lain" / batas 20 s.
             new = inside[0][0]
             nst = tracker.tracks[new]["state"]
-            self._event(now, "CEK ULANG", new, f"kotak di slot #{tid} kini bernomor #{new} - dipastikan ulang", nst)
+            self._event(now, "RECHECK", new, f"box in slot #{tid} is now #{new} - reconfirming", nst)
             # kotak AMBIL asli, dan apakah ada GERAKAN: kotak AMBIL sempat ditarik, atau kotak sebelah yang sudah
             # dikenal bergeser >= 0,5 x lebar ke slot ini (tanpa gerakan, bacaan yang membantah = BATAL biasa)
             q = to_poly(self.slot)
@@ -584,14 +591,14 @@ class SelectionSession:
             self.recheck_t0 = self.recheck_t0 if self.recheck_t0 is not None else now
             self.gone_since = self.occupied_since = None
             self.solid = False
-            self.message = f"DITEMUKAN: #{new} {req} - memeriksa ulang, JANGAN diambil dulu (nomor kotak berganti)"
+            self.message = f"FOUND: #{new} {req} - rechecking, do NOT take it yet (box number changed)"
             return
         if inside:
             self.gone_since = None
             self.occupied_since = self.occupied_since or now
-            self.message = f"DITEMUKAN: #{tid} - ada kotak lain di slotnya, memeriksa"
+            self.message = f"FOUND: #{tid} - another box is in its slot, checking"
             if now - self.occupied_since >= self.gone_s:
-                self._event(now, "BATAL AMBIL", tid, "ada kotak diam di slot dengan nomor lain - diperiksa ulang", st)
+                self._event(now, "PICK CANCELLED", tid, "a resting box with another number is in the slot - checking again", st)
                 self._unlock()
             return
         self.occupied_since = None
@@ -605,19 +612,19 @@ class SelectionSession:
             if left <= 0:
                 self._settle_taken(now, ids, polys, tracker, tid, st, {tid}, frame_size)
                 return
-            self.message = f"DITEMUKAN: #{tid} tidak ada di slotnya - memastikan terambil ({left:.1f} s)"
-            self.detail = "tahan kamera diam, slot harus tetap kosong"
+            self.message = f"FOUND: #{tid} is not in its slot - confirming it was taken ({left:.1f} s)"
+            self.detail = "hold the camera still, the slot must stay empty"
             return
         self.gone_since = None
-        self.message = f"DITEMUKAN: AMBIL #{tid} {req}"
+        self.message = f"FOUND: PICK #{tid} {req}"
         if not visible:
-            self.detail = "slot kotak itu di luar layar - arahkan kamera ke sana dan tahan diam"
+            self.detail = "that box's slot is off screen - point the camera there and hold still"
         elif same_box:
-            self.detail = f"kotak #{tid} masih terlihat di slotnya (belum terambil)"
+            self.detail = f"box #{tid} is still in its slot (not taken yet)"
         elif not slot_still:
-            self.detail = "slot masih bergerak / tertutup - tunggu sampai slot terlihat diam"
+            self.detail = "slot still moving / covered - wait until it is still"
         else:
-            self.detail = "tahan kamera diam untuk memastikan terambil"
+            self.detail = "hold the camera still to confirm it was taken"
 
     def _moved_here(self, ids, polys, tracker, skip, frame_size=None) -> list:
         """Kotak DIAM di rak yang muncul di tempat yang KOSONG saat AMBIL dikunci (>= 0,5 x lebar dari setiap kotak
@@ -649,35 +656,84 @@ class SelectionSession:
         belum terbaca `hold_s` detik -> BATAL juga (terambil atau dipindah tidak bisa dipastikan). -> True = selesai."""
         moved = self._moved_here(ids, polys, tracker, skip, frame_size)
         if any(s == MATCH for _, s in moved):
-            self._event(now, "BATAL AMBIL", tid, "kotak dipindah ke tempat lain di rak - dicari ulang", st)
+            self._event(now, "PICK CANCELLED", tid, "box moved elsewhere on the shelf - searching again", st)
             self._unlock()
             return True
         if moved:
             self.hold_since = self.hold_since if self.hold_since is not None else now
             if now - self.hold_since >= self.hold_s:
-                self._event(now, "BATAL AMBIL", tid, "terambil atau dipindah? kotak baru di rak belum terbaca "
-                                                     "- dicari ulang", st)
+                # final check (live test 09-10 17:30): the "new" box is usually a neighbour that slid / leaned into
+                # the gap. Every moved box read at least once and never like the target, target read nowhere -> TAKEN.
+                # A moved box that was never read could be the target itself -> cancel and search again (as before).
+                if self._moved_not_target(moved, tracker) and not self._target_read_anywhere(ids, tracker):
+                    self._taken(now, tid, st, tracker, watch=False,
+                                reason="box not visible anywhere; the boxes that shifted on the shelf are not the target")
+                    return True
+                self._event(now, "PICK CANCELLED", tid, "taken or moved? a new box on the shelf is not read yet "
+                                                     "- searching again", st)
                 self._unlock()
                 return True
-            self.message = (f"DITEMUKAN: #{tid} tidak di slotnya - memastikan tidak dipindah ke tempat lain "
-                            f"({', '.join('#' + str(t) for t, _ in moved[:4])} dibaca)")
-            self.detail = "jangan ambil kotak lain dulu; kotak yang baru diletakkan di rak sedang dibaca"
+            self.message = (f"FOUND: #{tid} not in its slot - making sure it was not moved elsewhere "
+                            f"(reading {', '.join('#' + str(t) for t, _ in moved[:4])})")
+            self.detail = "do not take another box yet; the box just put on the shelf is being read"
             return False
         self._taken(now, tid, st, tracker, **kw)
         return True
 
-    def _taken(self, now, tid, st, tracker, reason="slot kosong terverifikasi", watch=True):
+    def _taken(self, now, tid, st, tracker, reason="empty slot verified", watch=True):
         self.taken.append(Taken(tid, now, self.slot.copy(), st.gtin if st else "", st.lot if st else "",
                                 st.expiry if st else None))
         tracker.tracks.pop(tid, None)          # nomor ini tidak boleh menempel ke kotak lain
         self.remaining -= 1
         # slot yang sudah diisi kotak sebelah (watch=False) tidak diawasi "terisi lagi"
         self.watch = (self.slot.copy(), now, tid, self.box_patch) if watch else None
-        self._event(now, "TERAMBIL", tid, reason, st)
+        self._event(now, "TAKEN", tid, reason, st)
         self.adopted, self.neigh = None, {}
         self.pick, self.slot, self.box_patch, self.prev_patch, self.gone_since = None, None, None, None, None
         self.recheck_since = self.recheck_from = self.recheck_t0 = self.hold_since = None
         self.phase = SELESAI if self.remaining <= 0 else MENCARI
+
+    def _cancel_or_taken(self, now, tid, st, tracker, ids, frame, still, why) -> None:
+        """Final check before cancelling a PICK (live test 09-10: the box WAS taken, a neighbour leaned into its slot,
+        and the pick was cancelled instead of TAKEN). Moved or taken?
+          target read anywhere, or the slot still looks like the picked box, or no slot image -> cancel, search again
+          camera still, target read nowhere, slot looks different (empty / another box)        -> TAKEN"""
+        if still and not self._target_on_screen(ids, tracker, frame):
+            self._taken(now, tid, st, tracker, watch=False,
+                        reason=f"final check: target not seen anywhere and its slot no longer looks like it ({why})")
+            return
+        self._event(now, "PICK CANCELLED", tid, why, st)
+        self._unlock()
+
+    def _target_read_anywhere(self, ids, tracker) -> bool:
+        """Does any visible box read as the requested box (stable MATCH, or MATCH in its last reading)?"""
+        for t in ids:
+            if t < 0 or t not in tracker.tracks:
+                continue
+            s = tracker.tracks[t]["state"]
+            if s.stable(self.need) == MATCH or (s.history and s.history[-1][0] == MATCH):
+                return True
+        return False
+
+    @staticmethod
+    def _moved_not_target(moved, tracker) -> bool:
+        """Every box that shifted on the shelf has at least one real reading, and none of them ever read like the
+        target (MATCH or CANDIDATE)."""
+        for t, _ in moved:
+            rows = [d for d, k in tracker.tracks[t]["state"].history if k != EMPTY] if t in tracker.tracks else []
+            if not rows or any(d in (MATCH, CANDIDATE) for d in rows):
+                return False
+        return True
+
+    def _target_on_screen(self, ids, tracker, frame) -> bool:
+        """Is the requested box (possibly) still in view? True when any visible box reads MATCH (now or in its last
+        reading), or when the picked slot still looks like the picked box. Unknown (no slot image) -> True, so the
+        caller keeps the old, safe behaviour (cancel, search again) instead of declaring TAKEN."""
+        if self._target_read_anywhere(ids, tracker):
+            return True
+        if frame is None or self.box_patch is None or self.slot is None:
+            return True
+        return ncc(slot_patch(frame, self.slot), self.box_patch) >= SAME_BOX_NCC
 
     def _unlock(self):
         self.solid = False
@@ -693,7 +749,7 @@ class SelectionSession:
         menunjuk tepat kotak yang diminta (relock_status)."""
         if self.recheck_since is None:
             self.recheck_since = now
-            self._event(now, "CEK ULANG", tid, why, st)
+            self._event(now, "RECHECK", tid, why, st)
         if self.recheck_t0 is None:
             self.recheck_t0 = now
         self.recheck_from = from_reads
@@ -720,9 +776,9 @@ class SelectionSession:
         if not refilled and frame is not None and frame_size is not None and inside_fraction(slot, frame_size) >= 0.9:
             refilled = ncc(slot_patch(frame, slot), patch) >= SAME_BOX_NCC
         if refilled:
-            self.warning = f"PERINGATAN: slot #{tid} yang sudah kosong terisi lagi - pastikan kotak benar-benar diambil"
+            self.warning = f"WARNING: slot #{tid} was empty and is filled again - make sure the box was really taken"
             if self._warned != tid:
-                self._event(now, "PERINGATAN", tid, "slot terisi lagi setelah terambil")
+                self._event(now, "WARNING", tid, "slot filled again after the box was taken")
                 self._warned = tid
 
     # ------------------------------------------------------------------ bantu

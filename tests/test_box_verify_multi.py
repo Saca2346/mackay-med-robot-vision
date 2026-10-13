@@ -112,12 +112,12 @@ def test_verified_barcode_alone_is_match():
 
 def test_unverified_catalog_is_never_used():
     d, reason = run(Evidence(codes=[code("(01)04987350720245(17)280930")]), cat=catalog(False))
-    assert d == CONFIRM and "belum diverifikasi" in reason
+    assert d == CONFIRM and "not verified" in reason
 
 
 def test_unknown_gtin_is_confirm():
     d, reason = run(Evidence(codes=[code("(01)05413206252428(17)280131")]))
-    assert d == CONFIRM and "belum ada di katalog" in reason
+    assert d == CONFIRM and "not in the catalog" in reason
 
 
 def test_barcode_of_other_size_is_ignored():
@@ -159,7 +159,7 @@ def test_two_gtins_in_one_box_is_confirm():
 
 def test_too_far_is_confirm():
     d, reason = run(Evidence(too_far=True))
-    assert d == CONFIRM and "terlalu jauh" in reason
+    assert d == CONFIRM and "too far" in reason
 
 
 def test_ocr_gtin_counts_one_point():

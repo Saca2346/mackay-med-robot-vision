@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 from src.box_barcode import decode_gs1, find_gtins_in_text
+from src.box_expiry import find_dates
 from src.box_geometry import to_poly, warp_upright
 from src.box_ref import parse_refs
 from src.box_verifier import (CANDIDATE, CONFIRM, Evidence, Identity, _find_product, decide_multi, parse_identity,
@@ -203,7 +204,8 @@ def gather_full_box(ev: Evidence, box_crop, reader, cfg: dict | None = None) -> 
         n += 1
     extra = " ".join(t.text for t in more)
     ev.spine = extra
-    known = {(h.product, h.diameter, h.length) for h in ev.refs}
+    ev.dates = tuple(find_dates(extra))
+    known ={(h.product, h.diameter, h.length) for h in ev.refs}
     ev.refs += [h for h in parse_refs(extra) if (h.product, h.diameter, h.length) not in known]
     _merge_codes(ev, find_gtins_in_text(extra))
     if cfg is not None and more:

@@ -6,6 +6,12 @@ Laptop Lenovo + webcam eksternal HP w300 (diuji 2026-09-27):
   kamera 1 = kamera laptop 640x480 maksimum
 Nomor kamera di Windows bisa berubah (colok / cabut USB, urutan boot), jadi index "auto" memilih kamera dengan
 resolusi terbesar, yaitu webcam eksternal kalau terpasang.
+
+Intel RealSense (D435 / D435i / D415, dari 2026-10-08): beda jalur sama sekali dari webcam UVC biasa di atas.
+Satu RealSense muncul sebagai BEBERAPA node video ke Windows sekaligus (warna, depth, 2x inframerah) -- index
+"auto" (pilih resolusi terbesar) bisa salah ambil node depth/inframerah, bukan warna. Set `backend: "realsense"`
+di config supaya dibuka lewat pyrealsense2 langsung ke aliran WARNA saja (deteksi kotak tidak butuh depth),
+bukan lewat enumerasi index MSMF/DSHOW. `pip install pyrealsense2` dulu (lihat requirements_box.txt).
 """
 from __future__ import annotations
 
@@ -94,7 +100,7 @@ class ReconnectingCamera:
             backend = self.backend if attempt < 2 else ("dshow" if self.backend == "msmf" else "msmf")
             self.cap = self._make(backend)
             self.reconnects += 1
-            print(f"[kamera] gagal membaca, sambung ulang #{self.index} lewat {backend} "
+            print(f"[camera] read failed, reconnecting #{self.index} via {backend} "
                   f"(percobaan {attempt + 1}/{self.retries})", flush=True)
         return False, None
 
@@ -104,17 +110,128 @@ class ReconnectingCamera:
             self.cap = None
 
 
+class RealSenseCamera:
+    """Kamera Intel RealSense lewat pyrealsense2 -- hanya aliran WARNA, tidak mengaktifkan depth sama sekali
+    (deteksi kotak/OCR cuma butuh RGB; depth_estimator.py punya jalur sendiri kalau nanti dipakai bersama).
+    `cam_cfg["serial"]` opsional: nomor seri device kalau ada lebih dari satu RealSense tersambung, kosongkan
+    untuk pakai yang pertama ditemukan. Antarmuka sama dengan ReconnectingCamera: isOpened(), read(), release()
+    -- jadi kode lain (stream_webcam.py, test_webcam_box.py, enroll_gtin.py) tidak perlu tahu bedanya."""
+
+    def __init__(self, cam_cfg: dict, retries: int = 6):
+        try:
+            import pyrealsense2 as rs
+        except ImportError as e:
+            raise RuntimeError(
+                "pyrealsense2 is not installed. pip install pyrealsense2 (see requirements_box.txt), "
+                "or set backend to msmf/dshow/any if you are not using a RealSense camera."
+            ) from e
+        self.rs = rs
+        self.cfg = dict(cam_cfg)
+        self.retries = retries
+        self.reconnects = 0
+        self.pipeline = None
+        self._start()
+
+    def _begin(self, width: int, height: int, fps: int) -> None:
+        rs_cfg = self.rs.config()
+        if self.cfg.get("serial"):
+            rs_cfg.enable_device(str(self.cfg["serial"]))
+        rs_cfg.enable_stream(self.rs.stream.color, width, height, self.rs.format.bgr8, fps)
+        self.pipeline = self.rs.pipeline()
+        self.pipeline.start(rs_cfg)
+
+    def color_profiles(self) -> set[tuple[int, int, int]]:
+        """Profil warna yang ditawarkan kamera: {(lebar, tinggi, fps)}. Bergantung model dan jenis USB (USB 2 jauh
+        lebih sedikit dari USB 3)."""
+        out = set()
+        for d in self.rs.context().devices:
+            if self.cfg.get("serial") and d.get_info(self.rs.camera_info.serial_number) != str(self.cfg["serial"]):
+                continue
+            for s in d.sensors:
+                for p in s.get_stream_profiles():
+                    if p.stream_type() == self.rs.stream.color:
+                        v = p.as_video_stream_profile()
+                        out.add((v.width(), v.height(), int(p.fps())))
+        return out
+
+    def _start(self) -> None:
+        c = self.cfg
+        want = (int(c.get("width", 1920)), int(c.get("height", 1080)), int(c.get("fps", 30)))
+        try:
+            self._begin(*want)
+        except RuntimeError as e:
+            if "resolve" not in str(e).lower():        # "Couldn't resolve requests" = profil itu tidak ada di kamera
+                raise
+            have = self.color_profiles()
+            # terdekat yang tidak melebihi permintaan: utamakan fps >= 15 (di bawah itu pelacakan kotak patah-patah),
+            # lalu piksel terbanyak, lalu fps tertinggi. D455 di USB 2: 1280x720@15 menang atas 1280x800@8.
+            ok = [p for p in have if p[0] * p[1] <= want[0] * want[1] and p[2] <= want[2]]
+            ok = [p for p in ok if p[2] >= min(15, want[2])] or ok
+            alt = max(ok, key=lambda p: (p[0] * p[1], p[2])) if ok else None
+            if alt is None or alt == want:
+                raise RuntimeError(f"{e}. Colour profile {want} not available; the camera offers: {sorted(have)}. "
+                                   "Cek kabel di port USB 3.") from e
+            print(f"[camera] RealSense has no colour {want[0]}x{want[1]} @ {want[2]} fps -> using "
+                  f"{alt[0]}x{alt[1]} @ {alt[2]} fps", flush=True)
+            self._begin(*alt)
+
+    def isOpened(self) -> bool:
+        return self.pipeline is not None
+
+    def read(self):
+        for attempt in range(self.retries + 1):
+            if self.pipeline is not None:
+                try:
+                    frames = self.pipeline.wait_for_frames(5000)
+                    color = frames.get_color_frame()
+                    if color:
+                        return True, np.asanyarray(color.get_data())
+                except Exception:
+                    pass
+            if attempt == self.retries:
+                break
+            self.release()
+            time.sleep(min(0.5 * (attempt + 1), 2.0))
+            print(f"[camera] RealSense read failed, reconnecting (attempt {attempt + 1}/{self.retries})",
+                  flush=True)
+            try:
+                self._start()
+                self.reconnects += 1
+            except RuntimeError:
+                self.pipeline = None
+        return False, None
+
+    def release(self) -> None:
+        if self.pipeline is not None:
+            try:
+                self.pipeline.stop()
+            except Exception:
+                pass
+            self.pipeline = None
+
+
 def open_camera(cam_cfg: dict, index_override=None):
-    """-> (cam, index, (lebar, tinggi) yang benar-benar didapat); cam = ReconnectingCamera.
+    """-> (cam, index, (lebar, tinggi) yang benar-benar didapat); cam = ReconnectingCamera atau RealSenseCamera.
     cam_cfg = bagian 'camera' dari config."""
+    backend = str(cam_cfg.get("backend", "msmf")).lower()
+    if backend == "realsense":
+        try:
+            cam = RealSenseCamera(cam_cfg)             # tidak ada enumerasi index: SDK bicara ke device langsung
+        except RuntimeError as e:                      # SDK belum terpasang / kamera tidak ada / izin USB (udev)
+            print(f"[camera] cannot open the RealSense: {e}", flush=True)
+            return None, "realsense", None
+        ok, frame = cam.read()
+        if not ok:
+            cam.release()
+            return None, "realsense", None
+        return cam, "realsense", (frame.shape[1], frame.shape[0])
     index = cam_cfg.get("index", "auto") if index_override is None else index_override
-    backend = cam_cfg.get("backend", "msmf")
     if str(index).lower() == "auto":
         cams = list_cameras(backend=backend)
         if not cams:
             return None, None, None
         index = max(cams, key=lambda c: (c[1] * c[2], -c[0]))[0]
-        print("kamera  : " + ", ".join(f"#{i} {w}x{h}" for i, w, h in cams) + f" -> pakai #{index}")
+        print("camera  : " + ", ".join(f"#{i} {w}x{h}" for i, w, h in cams) + f" -> using #{index}")
     cam = ReconnectingCamera(int(index), cam_cfg)
     ok, frame = cam.read()
     if not ok:

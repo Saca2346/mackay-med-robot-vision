@@ -87,10 +87,10 @@ class FrameSource:
                 yield imgs[k % len(imgs)]
                 k += 1
         cap, idx, size = open_camera({"index": a.camera, "width": a.width, "height": a.height, "fps": 30,
-                                      "backend": "msmf", "fourcc": "MJPG"})
+                                      "backend": a.backend, "fourcc": "MJPG", "serial": a.serial})
         if cap is None:
-            raise RuntimeError("kamera tidak bisa dibuka (cek USB webcam, tutup aplikasi lain yang memakai kamera, "
-                               "atau --camera 0 / 1)")
+            raise RuntimeError("kamera tidak bisa dibuka (cek USB, tutup aplikasi lain yang memakai kamera -- "
+                               "RealSense Viewer juga -- atau webcam biasa: --backend msmf --camera 0 / 1)")
         print(f"[stream] kamera #{idx}: {size[0]}x{size[1]}" if size else f"[stream] kamera #{idx}", flush=True)
         gap = 1.0 / a.fps if a.fps else 0.0
         last = 0.0
@@ -161,7 +161,11 @@ def make_handler(src: FrameSource, clients: list):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--camera", default="auto", help='"auto" = resolusi terbesar (webcam eksternal), atau 0 / 1')
+    ap.add_argument("--camera", default="auto", help='"auto" = resolusi terbesar (webcam eksternal), atau 0 / 1 '
+                                                     "(diabaikan kalau --backend realsense)")
+    ap.add_argument("--backend", default=None, choices=["realsense", "msmf", "dshow", "any"],
+                    help="default: camera.backend dari config/box_pipeline_config.yaml (sekarang realsense)")
+    ap.add_argument("--serial", default="", help="RealSense: nomor seri device kalau >1 tersambung (default: pertama)")
     ap.add_argument("--width", type=int, default=1920)
     ap.add_argument("--height", type=int, default=1080)
     ap.add_argument("--quality", type=int, default=80, help="kualitas JPEG 1-100 (lebih kecil = lebih ringan di jaringan)")
@@ -175,6 +179,12 @@ def main():
     ap.add_argument("--fps", type=float, default=15.0,
                     help="fps maksimum yang dikirim (1080p JPEG 80 x 15 fps = sekitar 35 Mbit/s)")
     args = ap.parse_args()
+    if args.backend is None:                           # ikut config laptop: kamera dipilih di satu tempat saja
+        from src.config import load_config, resolve
+        cam_cfg = load_config(resolve("config/box_pipeline_config.yaml")).get("camera", {})
+        args.backend = str(cam_cfg.get("backend", "msmf")).lower()
+        args.serial = args.serial or str(cam_cfg.get("serial", "") or "")
+    print(f"[stream] kamera backend: {args.backend}", flush=True)
 
     src = FrameSource(args)
     clients: list = []

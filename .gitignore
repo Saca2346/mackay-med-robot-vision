@@ -23,3 +23,6 @@ data/gtin_evidence/
 *.tmp
 *.zip
 *.mp4
+
+# box list built from the inventory (hospital data)
+data/rak/box_list*

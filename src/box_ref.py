@@ -45,7 +45,9 @@ def _terumo(dd: str) -> float | None:
 
 
 RULES = [
-    ("angiolite", rf"[S5]C{{1,3}}D[S5]R{_D}{{2}}{_D}{{3}}({_D}{{3}})({_D}{{3}})", _x100),
+    # RealSense D455 08-10: "SCCDSR" terbaca SCCDSA / SCCD5A / SCCDSN / SCCOSR (R -> A/N, D -> O). Dengan R saja
+    # REF kotak angiolite 2.5 x 29 terbaca 5 kali dalam 133 s -> 20; K10 (4 x 19) tetap terbaca 4 x 19, tidak tertukar.
+    ("angiolite", rf"[S5]C{{1,3}}[DO0][S5][RAN]{_D}{{2}}{_D}{{3}}({_D}{{3}})({_D}{{3}})", _x100),
     ("essential pro", rf"[B8]CDPR{_D}{{2}}N{_D}{{3}}({_D}{{3}})({_D}{{3}})", _x100),
     ("xperience pro", rf"[B8]CPR{_D}{{2}}N{_D}{{3}}({_D}{{3}})({_D}{{3}})", _x100),
     ("accuforce", rf"DC[-_.]?RM({_D}{{2}})({_D}{{2}})(?:HHW)?", _terumo),

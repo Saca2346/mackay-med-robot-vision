@@ -28,13 +28,21 @@ from src.box_demo import SIAP, append_log, load_positions, lookup, to_text, to_t
 from src.box_inventory import Inventory  # noqa: E402
 
 
+def camera_request(req) -> str:
+    """Request text for test_webcam_box.py. A dated request (one specific box) keeps its date."""
+    if getattr(req, "expiry", None):
+        size = "" if req.diameter is None else f" {req.diameter:g} x {req.length:g}"
+        return f"{req.product}{size} {req.expiry.isoformat()}"
+    size = "" if req.diameter is None else f",{req.diameter:g},{req.length:g}"
+    return f"{req.product}{size}"
+
+
 def run_camera(res, args) -> None:
     """Status SIAP -> serahkan ke verifikasi kamera (test_webcam_box.py). Konfirmasi akhir tetap di dokter."""
     req = res.request
-    size = "" if req.diameter is None else f",{req.diameter:g},{req.length:g}"
     cmd = [sys.executable, str(ROOT / "scripts" / "test_webcam_box.py"), "--inventaris", args.inventaris,
-           "--request", f"{req.product}{size}"] + args.kamera_arg
-    print("Kamera     : " + " ".join(cmd[1:]))
+           "--request", camera_request(req)] + args.kamera_arg
+    print("Camera     : " + " ".join(cmd[1:]))
     subprocess.run(cmd, cwd=ROOT)
 
 
@@ -49,14 +57,12 @@ def run_one(text: str, args, inv: Inventory, positions) -> None:
     print(to_text(res))
     print("Pesan TM   : " + json.dumps(to_tm_message(res), ensure_ascii=False))
     if res.status == SIAP:
-        req = res.request
-        size = "" if req.diameter is None else f",{req.diameter:g},{req.length:g}"
         print(f"Verifikasi : python scripts/test_webcam_box.py --inventaris {args.inventaris} "
-              f"--request \"{req.product}{size}\"")
+              f"--request \"{camera_request(res.request)}\"")
         if args.kamera:
             run_camera(res, args)
     elif args.kamera:
-        print("Kamera     : tidak dijalankan (status bukan SIAP)")
+        print("Camera     : not started (status is not READY)")
 
 
 def main() -> None:
@@ -74,19 +80,19 @@ def main() -> None:
 
     inv_path, pos_path = pathlib.Path(args.inventaris), pathlib.Path(args.posisi)
     if not inv_path.exists():
-        sys.exit(f"Inventaris tidak ada: {inv_path} (jalankan dari folder proyek, atau isi --inventaris)")
+        sys.exit(f"Inventory missing: {inv_path} (run from the project folder, or give --inventaris)")
     inv = Inventory(inv_path)
     positions = load_positions(pos_path)
     if not positions:
-        print(f"PERINGATAN: tabel posisi kosong / tidak ada ({pos_path}); semua hasil akan 'posisi tidak diketahui'")
+        print(f"WARNING: position table empty / missing ({pos_path}); every result will be 'position unknown'")
     elif any(p.sumber == "contoh" for p in positions.values()) and not args.json:
-        print("Catatan: tabel posisi masih CONTOH (rak/level belum dari tim).")
+        print("Note: the position table is still an EXAMPLE (rack/level not from the team yet).")
 
     if args.sekali:
         run_one(args.sekali, args, inv, positions)
         return
-    print(f"Inventaris {inv_path} ({len(inv.boxes)} kotak), posisi {pos_path} ({len(positions)} baris).")
-    print("Ketik permintaan (brand + produk + spec). Enter kosong = keluar.")
+    print(f"Inventory {inv_path} ({len(inv.boxes)} boxes), positions {pos_path} ({len(positions)} rows).")
+    print("Type a request (brand + product + size). Empty Enter = quit.")
     while True:
         try:
             text = input("\nPermintaan > ").strip()

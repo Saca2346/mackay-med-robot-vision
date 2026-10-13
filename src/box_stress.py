@@ -17,7 +17,8 @@ import statistics
 from dataclasses import dataclass, field
 
 CONFIRM_S = 2.0          # AMBIL harus bertahan sekian detik (tidak langsung BATAL) supaya dihitung berhasil
-TIDAK_ADA_HOLD_S = 3.0   # TIDAK ADA bertahan sekian detik -> barang berikutnya
+TIDAK_ADA_HOLD_S = 3.0
+OK = ("PICK", "TAKEN")  # results that count as found   # TIDAK ADA bertahan sekian detik -> barang berikutnya
 
 
 @dataclass
@@ -56,8 +57,11 @@ class StressRun:
     steps: list
     per_item_s: float = 90.0
     log_path: pathlib.Path | None = None
+    until_taken: bool = False           # item ends at TAKEN (box really taken, empty slot verified),
+                                         # not at PICK: the list mode of the live test 09-10
     idx: int = -1
     waiting: bool = False
+    _taken: tuple | None = None          # (time, box number, reason) of TAKEN for the current item
     rows: list = field(default_factory=list)
     _t0: float = 0.0
     _found: tuple | None = None          # (waktu AMBIL, nomor kotak, alasan)
@@ -86,30 +90,38 @@ class StressRun:
 
     def start_item(self, now: float, stats: dict) -> None:
         self._t0, self._found, self._cek, self._batal, self._tidak_ada = now, None, 0, 0, None
+        self._taken = None
         self._base = (stats.get("reads", 0), stats.get("ocr_ms", 0.0))
 
     def on_events(self, events) -> None:
         for t, what, tid, reason, _ in events:
-            if what == "AMBIL" and self._found is None:
+            if what == "PICK" and self._found is None:
                 self._found = (t, tid, reason)
-            elif what == "CEK ULANG":
+            elif what == "TAKEN" and self._taken is None:
+                self._taken = (t, tid, reason)
+                if self._found is None:
+                    self._found = (t, tid, reason)
+            elif what == "RECHECK":
                 self._cek += 1
-            elif what == "BATAL AMBIL":
+            elif what == "PICK CANCELLED":
                 self._batal += 1
                 if self._found is not None and self._found[1] == tid:
                     self._found = None               # AMBIL yang batal tidak dihitung; tunggu AMBIL berikutnya
 
     def check(self, now: float, phase: str, pick) -> str | None:
-        """Barang sekarang selesai? -> hasil ("AMBIL", "TIDAK ADA", "WAKTU HABIS") atau None (lanjut mencari)."""
+        """Barang sekarang selesai? -> hasil ("PICK", "NOT FOUND", "TIMEOUT") atau None (lanjut mencari)."""
         if self.waiting or self.current is None:
             return None
-        if self._found is not None and now - self._found[0] >= CONFIRM_S and pick == self._found[1]:
-            return "AMBIL"
-        self._tidak_ada = (self._tidak_ada or now) if phase == "TIDAK ADA" else None
+        if self.until_taken:
+            if self._taken is not None:
+                return "TAKEN"
+        elif self._found is not None and now - self._found[0] >= CONFIRM_S and pick == self._found[1]:
+            return "PICK"
+        self._tidak_ada = (self._tidak_ada or now) if phase == "NOT FOUND" else None
         if self._tidak_ada is not None and now - self._tidak_ada >= TIDAK_ADA_HOLD_S:
-            return "TIDAK ADA"
+            return "NOT FOUND"
         if now - self._t0 >= self.per_item_s:
-            return "WAKTU HABIS"
+            return "TIMEOUT"
         return None
 
     def elapsed(self, now: float) -> float:
@@ -119,7 +131,7 @@ class StressRun:
         step = self.current
         reads = stats.get("reads", 0) - self._base[0]
         ms = stats.get("ocr_ms", 0.0) - self._base[1]
-        found = self._found if result == "AMBIL" else None
+        found = self._found if result in ("PICK", "TAKEN") else None
         row = {"no": sum(1 for s in self.steps[:self.idx + 1] if s.kind == "req"), "bagian": step.section,
                "permintaan": step.text, "catatan": step.note, "hasil": result,
                "detik": f"{(found[0] - self._t0) if found else now - self._t0:.1f}",
@@ -141,30 +153,30 @@ class StressRun:
     def status(self, now: float) -> str:
         step = self.current
         if step is None:
-            return "STRESS selesai"
+            return "STRESS done"
         if self.waiting:
-            return f"STRESS JEDA: {step.text} | ketik lanjut di terminal"
+            return f"STRESS PAUSE: {step.text} | type lanjut in the terminal"
         done = len(self.rows)
         return (f"STRESS {done + 1}/{self.n_req} {step.section[:30]} | {self.elapsed(now):.0f}/{self.per_item_s:.0f} s"
-                f" | berhasil {sum(r['hasil'] == 'AMBIL' for r in self.rows)}/{done}")
+                f" | found {sum(r['hasil'] in OK for r in self.rows)}/{done}")
 
     def summary(self) -> list[str]:
         if not self.rows:
-            return ["stress test: belum ada barang yang selesai"]
+            return ["stress test: no item finished yet"]
         out = []
         sections = []
         for r in self.rows:
             if r["bagian"] not in sections:
                 sections.append(r["bagian"])
-        for sec in sections + ["SEMUA"]:
-            rows = self.rows if sec == "SEMUA" else [r for r in self.rows if r["bagian"] == sec]
-            ok = [float(r["detik"]) for r in rows if r["hasil"] == "AMBIL"]
-            med = f", median {statistics.median(ok):.1f} s, maks {max(ok):.1f} s" if ok else ""
-            out.append(f"{sec or '(tanpa bagian)'}: AMBIL {len(ok)}/{len(rows)}{med}"
-                       f", waktu habis {sum(r['hasil'] == 'WAKTU HABIS' for r in rows)}"
-                       f", TIDAK ADA {sum(r['hasil'] == 'TIDAK ADA' for r in rows)}"
-                       f", BATAL {sum(int(r['batal']) for r in rows)}")
-        fails = [r for r in self.rows if r["hasil"] != "AMBIL"]
+        for sec in sections + ["ALL"]:
+            rows = self.rows if sec == "ALL" else [r for r in self.rows if r["bagian"] == sec]
+            ok = [float(r["detik"]) for r in rows if r["hasil"] in OK]
+            med = f", median {statistics.median(ok):.1f} s, max {max(ok):.1f} s" if ok else ""
+            out.append(f"{sec or '(no section)'}: PICK {len(ok)}/{len(rows)}{med}"
+                       f", timeout {sum(r['hasil'] == 'TIMEOUT' for r in rows)}"
+                       f", NOT FOUND {sum(r['hasil'] == 'NOT FOUND' for r in rows)}"
+                       f", cancelled {sum(int(r['batal']) for r in rows)}")
+        fails = [r for r in self.rows if r["hasil"] not in OK]
         if fails:
-            out.append("belum berhasil: " + "; ".join(f"{r['permintaan']} ({r['hasil']})" for r in fails))
+            out.append("not found yet: " + "; ".join(f"{r['permintaan']} ({r['hasil']})" for r in fails))
         return out

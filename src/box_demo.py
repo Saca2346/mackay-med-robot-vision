@@ -23,13 +23,13 @@ from dataclasses import dataclass, field
 from src.box_inventory import ACTIVE, STATUS_DIAMBIL, InvBox, Inventory
 from src.box_verifier import Request, brand_of, describe_request, parse_request
 
-SIAP, NO_POS, EXPIRED, HABIS, INVALID = "siap_verifikasi", "posisi_tidak_diketahui", "kedaluwarsa", "habis", \
-    "permintaan_tidak_valid"
-TEKS_STATUS = {SIAP: "SIAP - robot menuju posisi, lalu verifikasi kamera + konfirmasi dokter",
-               NO_POS: "PERLU KONFIRMASI - stok ada, posisi tidak ada di tabel posisi",
-               EXPIRED: "TIDAK DIAMBIL - stok yang ada sudah kedaluwarsa",
-               HABIS: "TIDAK ADA - tidak ada stok",
-               INVALID: "ULANGI - permintaan tidak dipahami"}
+SIAP, NO_POS, EXPIRED, HABIS, INVALID = "ready_to_verify", "position_unknown", "expired", "out_of_stock", \
+    "invalid_request"
+TEKS_STATUS = {SIAP: "READY - robot goes to the position, then camera verification + doctor confirmation",
+               NO_POS: "NEEDS CONFIRMATION - in stock, but the position is not in the position table",
+               EXPIRED: "NOT PICKED - the stock is expired",
+               HABIS: "NOT FOUND - out of stock",
+               INVALID: "REPEAT - request not understood"}
 
 
 # ------------------------------------------------------------------ tabel posisi
@@ -41,7 +41,7 @@ class Position:
     sumber: str = ""                  # "contoh" = belum dari tim, jangan dipakai di rumah sakit
 
     def __str__(self) -> str:
-        return f"rak {self.rak}, level {self.level}" + (f", kolom {self.kolom}" if self.kolom else "")
+        return f"rack {self.rak}, level {self.level}" + (f", column {self.kolom}" if self.kolom else "")
 
 
 def load_positions(path: str | pathlib.Path) -> dict[str, Position]:
@@ -93,23 +93,24 @@ def lookup(text: str, inv: Inventory, positions: dict[str, Position], today: dt.
     res.stock = [b.box_id for b in cands]
     if not cands:
         same = [b for b in inv.boxes.values() if b.status in ACTIVE + (STATUS_DIAMBIL,)
-                and Request(b.product, b.diameter, b.length) == req]
+                and Request(b.product, b.diameter, b.length, req.expiry and b.expiry_date()) == req]
         expired = [b for b in same if b.status in ACTIVE and b.expiry_date() and b.expiry_date() < today]
         taken = [b for b in same if b.status == STATUS_DIAMBIL]
         if expired:
             res.status = EXPIRED
-            res.reason = "kedaluwarsa: " + ", ".join(f"{b.box_id} ({b.expiry})" for b in expired)
+            res.reason = "expired: " + ", ".join(f"{b.box_id} ({b.expiry})" for b in expired)
         else:
             res.status = HABIS
-            res.reason = ("sudah diambil: " + ", ".join(b.box_id for b in taken)) if taken else "tidak ada di inventaris"
+            res.reason = ("already taken: " + ", ".join(b.box_id for b in taken)) if taken else (
+                f"no box with expiry {req.expiry.isoformat()} in the inventory" if req.expiry else "not in the inventory")
         return res
     res.box, res.status = pick_box(cands, positions)
     if res.box is not None:
         res.position = positions.get(res.box.box_id)
     if res.status == NO_POS:
-        res.reason = "posisi tidak ada di tabel posisi: " + ", ".join(res.stock)
+        res.reason = "position not in the position table: " + ", ".join(res.stock)
     elif res.position is not None and res.position.sumber == "contoh":
-        res.reason = "posisi dari tabel CONTOH (belum dari tim)"
+        res.reason = "position from the EXAMPLE table (not from the team yet)"
     return res
 
 
@@ -139,19 +140,19 @@ def to_tm_message(res: LookupResult) -> dict:
 
 def to_text(res: LookupResult) -> str:
     """Teks pendek untuk layar dokter / log: apa yang didengar dan diputuskan sistem."""
-    lines = [f"Permintaan : {res.text}"]
+    lines = [f"Request    : {res.text}"]
     if res.request is not None:
-        lines.append(f"Dipahami   : {describe_request(res.request)}")
+        lines.append(f"Understood : {describe_request(res.request)}")
     lines.append(f"Status     : {TEKS_STATUS[res.status]}")
     if res.box is not None:
-        exp = f", kedaluwarsa {res.box.expiry}" if res.box.expiry else ""
-        lines.append(f"Kotak      : {res.box.box_id} ({res.box.label()}{exp})")
+        exp = f", expiry {res.box.expiry}" if res.box.expiry else ""
+        lines.append(f"Box        : {res.box.box_id} ({res.box.label()}{exp})")
     if res.position is not None:
-        lines.append(f"Posisi     : {res.position}")
+        lines.append(f"Position   : {res.position}")
     if res.stock:
-        lines.append(f"Stok       : {len(res.stock)} kotak ({', '.join(res.stock)})")
+        lines.append(f"Stock      : {len(res.stock)} box(es) ({', '.join(res.stock)})")
     if res.reason:
-        lines.append(f"Catatan    : {res.reason}")
+        lines.append(f"Note       : {res.reason}")
     return "\n".join(lines)
 
 

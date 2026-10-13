@@ -42,7 +42,7 @@ def parse_item(text: str, catalog=None) -> Item:
             qty, text = int(m.group(1)), text[:m.start()] + " " + text[m.end():]
             break
     if not 1 <= qty <= MAX_QTY:
-        raise ValueError(f"jumlah {qty} tidak masuk akal (1-{MAX_QTY})")
+        raise ValueError(f"quantity {qty} is not plausible (1-{MAX_QTY})")
     return Item(parse_request(text.strip(" ,."), catalog), qty)
 
 
@@ -89,5 +89,5 @@ class OrderQueue:
         self.pending.extend(items)
 
     def describe(self) -> str:
-        now = f"sekarang: {self.current}" if self.current is not None else "tidak ada yang dicari"
-        return now + (" | berikutnya: " + ", ".join(str(i) for i in self.pending) if self.pending else "")
+        now = f"now: {self.current}" if self.current is not None else "nothing requested"
+        return now + (" | next: " + ", ".join(str(i) for i in self.pending) if self.pending else "")
