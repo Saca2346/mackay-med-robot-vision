@@ -269,7 +269,7 @@ Beri tahu Claude nama folder `results\sesi_<tanggal_waktu>\`; Claude membaca `LA
 
 ## Daftar centang
 
-- [ ] 0 `RUN_ON_SERVER.bat langkah9_tools_review` -> `done`
+- [x] 0 `RUN_ON_SERVER.bat langkah9_tools_review` -> `done` (14 Okt 06:43, dicek Claude: tool terpasang, antrean 51/163)
 - [ ] 1.1-1.4 task CVAT `baru_20260928_16h` dengan draf
 - [ ] 1.5 33 foto dikoreksi
 - [ ] 1.6-1.7 impor + `reviewed_to_spec.py` -> `33 converted, 0 to check`

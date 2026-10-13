@@ -101,7 +101,7 @@ learned as "not a date": never `ok` when unsure.
 
 ## Checklist
 
-- [ ] 0 `langkah9_tools_review` -> `done`
+- [x] 0 `langkah9_tools_review` -> `done` (14 Oct 06:43, checked: tools installed, queue 51/163)
 - [ ] 1 CVAT task, 33 photos corrected, import + `reviewed_to_spec.py` -> `33 converted, 0 to check`
 - [ ] 2 date review: session 1 [ ] 2 [ ] 3 [ ] 4 [ ] 5 [ ] 6 [ ]; `CEK=1` passes [ ]; training done [ ]; results sent [ ]
 - [ ] 3 session S [ ]; Sled Bag 2 [ ] 16 [ ] 0 [ ]; shelf data `s1_far` [ ] `s2_mid` [ ], frames extracted [ ]
