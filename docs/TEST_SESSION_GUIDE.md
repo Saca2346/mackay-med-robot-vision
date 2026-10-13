@@ -5,7 +5,7 @@ shows the cmd window and the camera window together. Every file of a session lan
 `results\sesi_<date_time>\`.
 
 ```bat
-cd C:\Users\sacab\Downloads\medicine_shelf_vision\medicine_shelf_vision
+cd C:\Users\sacab\Downloads\mackay_vision\code
 DEMO.bat
 ```
 Choose **S**. A minimised window "SCREEN RECORDER" opens: leave it alone, it stops by itself at the end.

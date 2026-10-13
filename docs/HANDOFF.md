@@ -2,6 +2,17 @@
 
 Newest entry first. One entry per finished piece of work: date, who, what changed, how it was tested, what is open.
 
+## 2026-10-14 (night) - Claude Code (laptop): step-by-step guide for the remaining work
+
+* `docs/id/PANDUAN_SISA_PEKERJAAN.md` (owner's working copy) and `docs/REMAINING_WORK.md`: task 0 install tools, task 1 CVAT
+  correction of the 33 photos, task 2 date review + 3-class training, task 3 shelf tests (incl. Sled Bag date test 2 / 16 / 0).
+* Found while writing it: every date tool numbers the boxes from `label_specs/`, so boxes corrected in CVAT
+  (`labels_reviewed_obb/`) were invisible to them and `mulai_training_3kelas.sh` would stop ("cek kelas 2 manual"). New
+  `labeling/tools/reviewed_to_spec.py` converts them back into the spec and re-proposes the dates; `review_tanggal.py` now
+  skips box drafts, prints the sheet path (VS Code Remote-SSH) and counts all photos instead of a fixed 163. Tested on a copy of
+  the project (CVAT-style correction -> import -> convert: geometry 0.0 px off, queue correct). CVAT runs on server port 8080.
+* Open: owner runs `RUN_ON_SERVER.bat langkah9_tools_review` (package already uploaded; remote writes are the owner's).
+
 ## 2026-10-14 (evening) - Claude Code (laptop): audit, server comparison run, commit
 
 * Folder move is DONE (the entry below is outdated on this point): `mackay_vision\code` and `\labeling` are real folders, the old
