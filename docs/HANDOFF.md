@@ -26,8 +26,12 @@ Newest entry first. One entry per finished piece of work: date, who, what change
   let tool-reviewed labels into training without the expiry review (now same rule as specs; verified on simulated input).
   `code/src/box_expiry.py` got the server's hourglass fix (`82029-03-24` was dropped, so a dated Sled Bag request could not PICK);
   2 new tests, 270 pass. The live pipeline is not re-tested with the camera.
-* Open (needs the owner's OK, it changes the server): copy to the server the laptop `labeling_progress.csv`, the 33 photos' specs /
-  expiry files / `labels_final_obb` / `labels_auto`, the fixed tools, `server_scripts/` and `compare_server.py`.
+* Server sync: package (278 files) and lists uploaded to the server `~/Downloads/` (nothing overwritten). Applying it was blocked
+  for Claude (remote writes need the owner); the owner runs `labeling\RUN_ON_SERVER.bat langkah8_sync_laptop` (backup first,
+  then 33 photos to `raw/`, extract, rebuild the batch). Afterwards `RUN_ON_SERVER.bat langkah7_manifest` + `compare_server.py`
+  must show no label differences.
+* Push: `code` branch `claude/sync-20261014` is on GitHub (PR not opened). `labeling` push failed: GitHub says the remote
+  `Saca2346/mackay-med-robot-vision-` does not exist; owner to create it (private) or give the right URL.
 * Missing locally, not needed by the box pipeline: `data/test_assets/synthetic_shelf.mp4` (`scripts/generate_test_assets.py`),
   `data/book_db.sqlite`. The 3-class model and v5/v6 are only on the server.
 * Commit: all work since 8 Oct committed on branch `claude/sync-20261014` in both repos (not pushed). The labelling repo got a
