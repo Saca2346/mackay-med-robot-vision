@@ -12,7 +12,8 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from src.box_evidence import read_evidence, redecide
+from src.box_crops import barcode_with_text, best_date_crop, numeral_crop, pick_number_tiles, upright_date
+from src.box_evidence import bright_label_crops, read_evidence, redecide
 
 
 def date_region_retry(image, tokens, reader):
@@ -38,6 +39,20 @@ def date_region_retry(image, tokens, reader):
         if len(bands) == 2:
             break
     return bands
+
+
+_PANEL_READER = []
+
+
+def panel_reader():
+    """One small OCR engine of the evidence thread, made on first use (it only turns display crops upright)."""
+    if not _PANEL_READER:
+        from src.box_ocr import SizeTextReader
+        try:
+            _PANEL_READER.append(SizeTextReader(threads=1))
+        except Exception:  # noqa: BLE001
+            _PANEL_READER.append(None)
+    return _PANEL_READER[0]
 
 
 class EvidenceWriter:
@@ -143,9 +158,7 @@ def read_target_evidence(sl_crops, box_crop, too_far, reader, cfg, req, catalog=
                 for token in band.get("field_tokens", band["tokens"]):
                     if (token.poly is not None and token.conf >= cfg["ocr"]["min_confidence"]
                             and re.fullmatch(r"\d{1,2}(?:[.,]\d{1,2})?(?:\s*mm)?", token.text, re.I)):
-                        x0, y0 = np.floor(token.poly.min(axis=0)).astype(int)
-                        x1, y1 = np.ceil(token.poly.max(axis=0)).astype(int)
-                        image = band["image"][max(0, y0-2):y1+2, max(0, x0-2):x1+2].copy()
+                        image = numeral_crop(band["image"], token.poly)
                         if image.size:
                             numbers.append({"text": token.text, "confidence": token.conf, "image": image})
     # Angiolite's large numerals face across the spine in the current webcam layout.
@@ -159,10 +172,7 @@ def read_target_evidence(sl_crops, box_crop, too_far, reader, cfg, req, catalog=
             for token in found:
                 if (token.poly is not None and token.conf >= cfg["ocr"]["min_confidence"]
                         and re.fullmatch(r"\d{1,2}(?:[.,]\d{1,2})?(?:\s*mm)?", token.text, re.I)):
-                    x0, y0 = np.floor(token.poly.min(axis=0)).astype(int)
-                    x1, y1 = np.ceil(token.poly.max(axis=0)).astype(int)
-                    crop_number = upright[max(0, y0-2):min(upright.shape[0], y1+2),
-                                          max(0, x0-2):min(upright.shape[1], x1+2)].copy()
+                    crop_number = numeral_crop(upright, token.poly)
                     if crop_number.size:
                         numbers.append({"text": token.text, "confidence": token.conf, "image": crop_number})
         text = " ".join(t.text for t in tokens)
@@ -182,7 +192,7 @@ def read_target_evidence(sl_crops, box_crop, too_far, reader, cfg, req, catalog=
         ev = result[0]
         ev.dates = tuple(sorted(set(ev.dates) | set(find_dates(ev.text.text if ev.text else ""))))
     result[0].capture = {"spine": box_crop, "labels": sl_crops, "numbers": numbers, "bands": bands,
-                         "decode_barcodes": decode_barcodes}
+                         "decode_barcodes": decode_barcodes, "date_crop": best_date_crop(bands)[0]}
     return result
 
 
@@ -250,7 +260,7 @@ def save_evidence(root, run_id, req, tid, state, verified, seconds, time_basis):
         crops = (pick_crops(spine, group) if barcode_enabled else
                  {"spine": rectify(spine, group.box.poly)[0], "barcode": None,
                   "barcode_decoded": False, "barcode_text": "", "barcode_disabled": True})
-        crops["size_labels"] = capture["labels"]
+        crops["size_labels"] = bright_label_crops(capture["labels"])    # not the dark TERUMO logo crop
         cv2.imwrite(str(sub / "spine_ocr_input.png"), spine)
         cv2.imwrite(str(sub / "spine.png"), crops["spine"])
         for j, lab in enumerate(capture["labels"], 1):
@@ -310,9 +320,32 @@ def save_evidence(root, run_id, req, tid, state, verified, seconds, time_basis):
     # Enlarge actual numeral regions in the panel, while retaining full labels on disk.
     latest_numbers = next((getattr(e, "capture", {}).get("numbers", []) for e in reversed(state.evs)
                            if getattr(e, "capture", {}).get("numbers")), [])
-    if latest_numbers and last_crops is not None:
+    latest_date = next((getattr(e, "capture", {}).get("date_crop") for e in reversed(state.evs)
+                        if getattr(e, "capture", {}).get("date_crop") is not None), None)
+    size = {k: fields[k]["value"] for k in ("diameter_mm", "length_mm")}
+    shown = pick_number_tiles(latest_numbers, float(size["diameter_mm"]) if size["diameter_mm"] else None,
+                              float(size["length_mm"]) if size["length_mm"] else None)
+    if latest_date is not None:
+        latest_date = upright_date(latest_date, panel_reader())
+    if last_crops is not None:
+        # Owner review 23-10: a Sled Bag has no size, so its slot shows the printed date that was read (upright, as the OCR
+        # read it); a sized box shows the expiry date next to the size when a complete date was read. Display only.
+        if latest_date is not None and not any(size.values()):
+            last_crops = dict(last_crops, size_labels=[latest_date], size_title="date (OCR)")
+        elif latest_date is not None:
+            last_crops = dict(last_crops, dates=[latest_date])
+        spine = next((e.capture["spine"] for e in reversed(state.evs)
+                      if getattr(e, "capture", None) and e.capture["spine"] is not None), None)
+        if spine is not None and last_crops.get("barcode") is None:
+            h, w = spine.shape[:2]
+            upright = rectify(spine, np.float32([[0, 0], [w-1, 0], [w-1, h-1], [0, h-1]]))[0]
+            located, _ = barcode_with_text(upright)
+            if located is not None:
+                cv2.imwrite(str(folder / "barcode_located.png"), located)
+                last_crops = dict(last_crops, barcode=located, barcode_disabled=False, barcode_decoded=False)
+    if shown and last_crops is not None:
         tiles = []
-        for number in latest_numbers[:4]:
+        for number in shown:
             img = number["image"]
             scale = min(100 / img.shape[0], 150 / img.shape[1])
             tile = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)

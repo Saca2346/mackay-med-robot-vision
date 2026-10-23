@@ -15,6 +15,8 @@ Corners are given in the camera frame (px), like the rest of grasp.jsonl.
 """
 from __future__ import annotations
 
+import re
+
 import cv2
 import numpy as np
 
@@ -78,6 +80,97 @@ def locate_barcode(spine: np.ndarray):
             if s > best_s:
                 best, best_s = np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], np.float32), s
     return best, best_s
+
+
+def numeral_crop(img, poly, unit=True):
+    """Crop of one OCR token (a size numeral). With unit=True the box is widened to the print around it, mostly
+    downwards, so the "mm" under the numeral stays in (owner review 23-10: "mm" was cut off). Display only."""
+    p = np.asarray(poly, np.float32)
+    (x0, y0), (x1, y1) = p.min(axis=0), p.max(axis=0)
+    w, h = x1 - x0, y1 - y0
+    px, top, bottom = (0.12 * w, 0.10 * h, 0.75 * h) if unit else (2, 2, 2)
+    H, W = img.shape[:2]
+    a, b = max(0, int(np.floor(x0 - px))), max(0, int(np.floor(y0 - top)))
+    c, d = min(W, int(np.ceil(x1 + px))), min(H, int(np.ceil(y1 + bottom)))
+    return img[b:d, a:c].copy()
+
+
+def _number(text):
+    m = re.fullmatch(r"\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:mm)?\s*", text or "", re.I)
+    return float(m.group(1).replace(",", ".")) if m else None
+
+
+def pick_number_tiles(numbers, diameter=None, length=None, limit=4):
+    """The numeral crops to show: the best-read one for the diameter and for the length of the verified identity (one each, so
+    no date fragment and no duplicate); without a verified size, the distinct short numerals. -> list of number dicts."""
+    best = {}
+    for n in numbers or []:
+        v = _number(n.get("text"))
+        if v is None:
+            continue
+        for want in (diameter, length):
+            if want is not None and abs(v - float(want)) < 1e-6 and n["confidence"] >= best.get(want, (0,))[0]:
+                best[want] = (n["confidence"], n)
+    chosen = [best[w][1] for w in (diameter, length) if w is not None and w in best]
+    if chosen or diameter is not None or length is not None:
+        return chosen
+    seen, out = set(), []
+    for n in sorted(numbers or [], key=lambda n: -n["confidence"]):
+        key = _number(n.get("text"))
+        if key is not None and key not in seen:
+            seen.add(key)
+            out.append(n)
+    return out[:limit]
+
+
+_DATE = re.compile(r"(?:19|20)\d\d\s*[-./]\s*\d{1,2}\s*[-./]\s*\d{1,2}")
+
+
+def best_date_crop(bands, min_conf=0.9):
+    """The crop of the best-read COMPLETE printed date token among the bands the OCR read (upright, as it was read)
+    -> (image, text) or (None, None). A fragment ("202") or a low-confidence read gives nothing."""
+    best = None
+    for band in bands or []:
+        for t in band.get("tokens", []):
+            if t.poly is None or t.conf < min_conf or not _DATE.fullmatch(t.text.strip()):
+                continue
+            if best is None or t.conf > best[0]:
+                best = (t.conf, band["image"], t.poly, t.text.strip())
+    if best is None:
+        return None, None
+    image = numeral_crop(best[1], best[2], unit=False)
+    if not image.size:
+        return None, None
+    return cv2.copyMakeBorder(image, 4, 4, 4, 4, cv2.BORDER_REPLICATE), best[3]
+
+
+def upright_date(image, reader):
+    """A date crop turned so it reads upright: the OCR reads upside-down text through its built-in classifier, so the crop
+    itself may be upside down (a Sled Bag spine, owner review 23-10). Both turns are read with the classifier off and the
+    one that reads as a complete date with the higher confidence wins; the crop as it is wins a tie. Display only."""
+    if image is None or reader is None:
+        return image
+    def score(img):
+        toks = reader.read_as_is(img).tokens
+        return max([t.conf for t in toks if _DATE.fullmatch(t.text.strip())] or [0.0])
+    try:
+        turned = cv2.rotate(image, cv2.ROTATE_180)
+        return turned if score(turned) > score(image) else image
+    except Exception:  # noqa: BLE001 - never lose the evidence panel over a display detail
+        return image
+
+
+def barcode_with_text(spine, min_score=0.3):
+    """Located (not decoded) barcode of an upright spine with the print around it (REF text, dates) -> (image, score)
+    or (None, score). Below min_score the block is more likely a logo or text (K16 and K04 of 23-10 scored 0.14 and
+    0.10; the real barcodes of K07 and K21 0.39 and 0.44)."""
+    corners, score = locate_barcode(spine)
+    if corners is None or score < min_score:
+        return None, score
+    y0, y1 = int(corners[:, 1].min()), int(corners[:, 1].max())
+    h = y1 - y0
+    top, bottom = max(0, y0 - int(0.35 * h)), min(spine.shape[0], y1 + int(0.6 * h))
+    return spine[top:bottom, :].copy(), score
 
 
 def pick_crops(frame: np.ndarray, group, decode=None) -> dict:
@@ -156,7 +249,9 @@ def panel(crops: dict, fields: dict, height: int = 300, reader=None) -> np.ndarr
         parts.append(block(bc, "barcode, " + ("decoded" if crops.get("barcode_decoded") else
                                               "located (not decoded)" if bc is not None else "not found"), 380))
     labs = crops.get("size_labels") or []
-    parts.append(block(readable(labs[0], reader) if labs else None, "size label (OCR)", 380))
+    parts.append(block(readable(labs[0], reader) if labs else None, crops.get("size_title", "size label (OCR)"), 380))
+    if crops.get("dates"):
+        parts.append(block(crops["dates"][0], "expiry date (OCR)", 200))
     txt = np.full((height, 400, 3), bg, np.uint8)
     cv2.putText(txt, "structured output", (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, grey, 1, cv2.LINE_AA)
     y = 56

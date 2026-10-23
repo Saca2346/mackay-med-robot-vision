@@ -100,12 +100,12 @@ class SizeTextReader:
         # pemanasan: panggilan pertama memuat model OCR (lambat), jangan ikut dihitung
         self._run(np.full((48, 160, 3), 255, dtype=np.uint8))
 
-    def _run(self, img: np.ndarray) -> list[OcrToken]:
+    def _run(self, img: np.ndarray, use_cls: bool = True) -> list[OcrToken]:
         if self.engine_name == "rapidocr":
             if self._api == 1:
-                result, _ = self._engine(img)
+                result, _ = self._engine(img, use_cls=use_cls)
             else:
-                out = self._engine(img)
+                out = self._engine(img, use_cls=use_cls)
                 result = [] if out.txts is None else list(zip(out.boxes, out.txts, out.scores))
             if not result:
                 return []
@@ -158,6 +158,13 @@ class SizeTextReader:
     def read_orient(self, crop: np.ndarray, rot) -> OcrResult:
         """Baca crop dalam SATU arah (rot = None atau konstanta cv2.ROTATE_*)."""
         return self.read_once(crop if rot is None or crop is None or crop.size == 0 else cv2.rotate(crop, rot))
+
+    def read_as_is(self, img: np.ndarray) -> OcrResult:
+        """One read WITHOUT the built-in 180 degree classifier: upside-down text reads worse than upright text, so the
+        orientation of a crop can be told by comparing it with its 180 degree turn (evidence panel only)."""
+        if img is None or img.size == 0 or min(img.shape[:2]) < 4:
+            return OcrResult()
+        return OcrResult(tokens=self._run(img, use_cls=False))
 
     def read_once(self, img: np.ndarray) -> OcrResult:
         """Satu kali baca tanpa mencoba arah lain (teks panjang yang arahnya sudah diketahui, mis. REF)."""

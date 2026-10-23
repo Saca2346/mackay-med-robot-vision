@@ -4,6 +4,13 @@ Newest entry first. One entry per finished piece of work: date, who, what change
 
 ## 2026-10-23 - Owner decision: barcode stays OFF for the Sled Bags (recorded by Claude Code)
 
+* Owner review of the replay batch `logo_ab/pos_on_3/webcam/positives` (owner_review_positives.csv, 24 Oct): all 11 ACCEPT (correct box, outline, sources OK; date OK only for the 4 Sled Bags, N/A otherwise).
+  Notes turned into display-only panel fixes (no matching/PICK rule touched): (1) "mm" under the size numerals was cut: `numeral_crop` widens the crop downwards; (2) K06 showed date fragments, K15 a duplicate
+  numeral: `pick_number_tiles` shows one crop for the verified diameter and one for the length; (3) Sled Bags: the slot shows the printed date that was read, turned upright (`upright_date`: both turns read with
+  the OCR classifier off, `SizeTextReader.read_as_is`; the old slot showed the name crop upside down); sized boxes get an "expiry date" block only when a COMPLETE date was read; (4) Accuforce: "barcode, located (not decoded)" block with
+  the REF text and dates beside it, only when the bar-pattern score is >= 0.3 (K07 0.39, K21 0.44 shown; K16 0.14 and K04 0.10 were logo/text and are not shown; the real K16 barcode is too blurred to locate);
+  (5) the dark TERUMO logo is no longer the "size label" crop of Accuforce panels (`bright_label_crops`). Replays `results/weekly_20261023/crops_review_fix` (11) and `crops_review_fix2` (5): panels checked by eye.
+  628 tests pass. OPEN, needs the owner: the note "barcode buat hijau hanya untuk permanent sled bag ... hanya tanggal" may mean Sled Bags may go green on name + date alone (one source). That would relax the two-source rule and is NOT done.
 * Fix: videos in `REVIEW.html` did not play in the browser: the programs write OpenCV mp4v (MPEG-4 part 2), which browsers cannot decode. `scripts/box_target_review.py` now makes an H.264
   copy (`view_browser.mp4`, yuv420p, faststart; imageio-ffmpeg, original kept, falls back to the original if ffmpeg is missing) and links it; new test. Existing pages (the 6 live webcam batches,
   weekly live_d455, live_d455_2, live_webcam_c, confusion_final, confusion/realsense) were patched with `results/weekly_20261023/fix_review_videos.py`. Other older review pages still link mp4v.
