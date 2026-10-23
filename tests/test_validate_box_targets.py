@@ -192,3 +192,19 @@ def test_live_calibration_failure_stops_before_any_target(tmp_path, monkeypatch)
     monkeypatch.setattr(batch,'run_case',lambda *a:pytest.fail('detection must not start'))
     assert batch.main(['--live','--camera','webcam','--config',str(batch.ROOT/'config/box_pipeline_config_focus.yaml'),
                        '--calibrate-first','--output',str(tmp_path/'out')])==1
+
+
+def test_review_video_gets_an_h264_browser_copy(tmp_path):
+    import cv2
+    import numpy as np
+    from scripts.box_target_review import browser_video
+    src = tmp_path / "view.mp4"
+    w = cv2.VideoWriter(str(src), cv2.VideoWriter_fourcc(*"mp4v"), 6, (64, 48))   # what the programs write: browsers cannot play it
+    for i in range(12):
+        w.write(np.full((48, 64, 3), i * 10, np.uint8))
+    w.release()
+    out = browser_video(src)
+    assert out == tmp_path / "view_browser.mp4" and src.is_file()                   # original kept
+    assert b"avc1" in out.read_bytes()[:4096] and out.read_bytes()[4:8] == b"ftyp"
+    assert browser_video(src) == out                                                 # second call reuses it
+    assert browser_video(tmp_path / "missing.mp4") is None

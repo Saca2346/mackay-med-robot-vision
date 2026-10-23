@@ -4,6 +4,9 @@ Newest entry first. One entry per finished piece of work: date, who, what change
 
 ## 2026-10-23 - Owner decision: barcode stays OFF for the Sled Bags (recorded by Claude Code)
 
+* Fix: videos in `REVIEW.html` did not play in the browser: the programs write OpenCV mp4v (MPEG-4 part 2), which browsers cannot decode. `scripts/box_target_review.py` now makes an H.264
+  copy (`view_browser.mp4`, yuv420p, faststart; imageio-ffmpeg, original kept, falls back to the original if ffmpeg is missing) and links it; new test. Existing pages (the 6 live webcam batches,
+  weekly live_d455, live_d455_2, live_webcam_c, confusion_final, confusion/realsense) were patched with `results/weekly_20261023/fix_review_videos.py`. Other older review pages still link mp4v.
 * Repeat measurement after both REF fixes, 5 live webcam batches (charger on, gate ON, sharpness 482-526; `live_webcam_20261023_211305/batch_after_fix, batch_final, batch_rep4, batch_rep5`
   and the recorded hands-off run `live_webcam_20261023_221521`): sized boxes green in 33 of 35 requests (K04, K06, K07, K10, K15, K21 5 of 5; K16 3 of 5: its REF is intermittent,
   in the recorded run it was never read, only TEXT READ), 9 of 35 within 2 s. Median green seconds: K15 1.72, K06 1.57, K10 2.08, K21 2.55, K04 2.77, K16 3.11, K07 5.41; single values

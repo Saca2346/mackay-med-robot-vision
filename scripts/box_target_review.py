@@ -4,6 +4,7 @@ import csv
 import json
 import os
 from pathlib import Path
+import subprocess
 from urllib.parse import quote
 
 
@@ -74,6 +75,28 @@ matrix();
 </script></html>'''
 
 
+def browser_video(video):
+    """H.264 copy of an OpenCV mp4v video (browsers cannot play MPEG-4 part 2): view.mp4 -> view_browser.mp4.
+    The original stays untouched. Returns the copy, or None when ffmpeg (imageio-ffmpeg) is missing or fails."""
+    video = Path(video)
+    out = video.with_name(video.stem + "_browser.mp4")
+    if out.is_file() and out.stat().st_size > 0:
+        return out
+    if not video.is_file():
+        return None
+    try:
+        import imageio_ffmpeg
+        done = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(video),
+                               "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+                               "-movflags", "+faststart", str(out)], capture_output=True, timeout=300)
+    except (ImportError, OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0 or not out.is_file():
+        out.unlink(missing_ok=True)
+        return None
+    return out
+
+
 def write_review(output, plan, rows):
     output = Path(output).resolve()
     metadata_file = output / "inputs.json"
@@ -109,11 +132,11 @@ def write_review(output, plan, rows):
                     and row.get("green_frame_seconds") is not None and row["green_frame_seconds"] <= 2
                     and row["capture_seconds_at_green"] is not None and row["capture_seconds_at_green"] <= 2)
         retimed = take / "view_real_time.mp4" if take else None
-        browser_video = take / "view_browser.mp4" if take else None
+        source_video = retimed if retimed and retimed.exists() else take / "view.mp4" if take else None
+        web_video = browser_video(source_video) if take else None
         row["links"] = {"CMD": href(take / "cmd.txt") if take else None,
-                        "video": href(browser_video if browser_video and browser_video.exists() else
-                                      retimed if retimed and retimed.exists() else take / "view.mp4") if take else None,
-                        "original_encoded_video": href(take / "view.mp4") if retimed and retimed.exists() else None,
+                        "video": href(web_video or source_video) if take else None,
+                        "original_encoded_video": href(take / "view.mp4") if take and source_video != take / "view.mp4" or web_video else None,
                         "frame_timing": href(take / "frame_latency.jsonl") if take else None,
                         "final_photo": href(row.get("final_photo")),
                         "first_verified_photo": href(row.get("first_verified_photo")),
