@@ -32,7 +32,8 @@ Before recording, `UJI_REALSENSE.bat` → **D** runs `scripts/kalibrasi_kamera.p
 | Boxes found | ≥ 3 | aim at the shelf, check the light |
 | Box width | ≥ 40 px (WARN 28–40, FAIL < 28) | move closer |
 | Sharpness | ≥ 300 | refocus, change the distance, check glare / lens |
-| Camera still (3 s) | frame change < 3 | tripod; something moved in the picture |
+| Camera still (3 s, after a 5 s hands-off countdown) | camera shift < 4 px (brightness changes ignored); measured again automatically up to 3 times | tripod; do not touch laptop, cable or shelf |
+| Nothing moving in view | < 5 % of the picture changed (WARN only) | wait until no hand, person or loose paper moves |
 | Camera roll | boxes lean < 3° (WARN < 8°) | level the camera |
 | Shelf inside the frame | ≥ 3 % free left and right, no box cut | centre the shelf |
 | Same position as the reference | shift ≤ 25 px, scale ± 8 %, roll ± 2° | put the camera back (only with `--ref … --same-position`) |
@@ -86,3 +87,19 @@ Target: about 150–300 kept frames from s1–s6; s7 stays a separate test set.
 | Detection time on the laptop (960 model) | ≤ 110 ms / frame | 52–110 ms |
 | Request → PICK, iVascular | median ≤ 30 s | 7–55 s |
 | Request → PICK, other brands | decided after the close-up test | no PICK at shelf distance |
+
+## 6. Two shelves: shelf 1, then shelf 2, then both together
+
+Indonesian step-by-step version: `docs/id/PROTOKOL_DATA_DUA_RAK.md`. Conditions and calibration as in sections 1-2.
+
+| Phase | Sessions (this week in bold) | Note |
+| --- | --- | --- |
+| 1 Shelf 1 | **`r1_s1_far`, `r1_s2_mid`**, later `r1_s3_close`, `r1_s4_order` (ref `r1_s2_mid`), `r1_s5_hard`, `r1_s6_angle` | known setup, baseline |
+| 2 Shelf 2 | **`r2_s1_far`, `r2_s2_mid`**, later the same as shelf 1 | new background and light; calibrate again |
+| 3 Both shelves | **`r12_s1_far`** (both in one view: boxes probably < 28 px, detection / counting only, record despite FAIL), **`r12_s2_mid`** (pan shelf 1 -> gap / post -> shelf 2, hold still at the gap), `r12_s7_test` (held out) | the robot's real view; posts between shelves are hard negatives |
+
+* `TEST_REALSENSE.bat` menu **D** now asks **Boxes in view** (Enter = 20) so a shelf-only or two-shelf view is counted right.
+* Before each shelf phase: phone photo of the shelf and the list of boxes on it. `data/rak/posisi.csv` has shelf R1 only
+  (example); shelf 2 positions are still missing.
+* Validation: whole sessions only; keep one shelf-2 session (e.g. `r2_s2_mid`) for validation to test a shelf the model
+  was not trained on. `r12_s7_test` never goes into training.

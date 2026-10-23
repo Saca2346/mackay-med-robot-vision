@@ -4,6 +4,32 @@ import numpy as np
 import src.box_camera as bc
 
 
+def test_dshow_preserves_requested_codec_after_size_and_fps_negotiation(monkeypatch):
+    class NegotiatingCap:
+        # The C930e driver falls back to raw YUY2 when size/FPS changes.
+        # A successful earlier MJPG setter does not describe the final stream.
+        def __init__(self):
+            self.codec = bc.cv2.VideoWriter_fourcc(*'YUY2')
+
+        def isOpened(self):
+            return True
+
+        def set(self, prop, value):
+            if prop == bc.cv2.CAP_PROP_FOURCC:
+                self.codec = value
+            elif prop in (bc.cv2.CAP_PROP_FRAME_WIDTH, bc.cv2.CAP_PROP_FRAME_HEIGHT, bc.cv2.CAP_PROP_FPS):
+                self.codec = bc.cv2.VideoWriter_fourcc(*'YUY2')
+            return True
+
+        def get(self, prop):
+            return self.codec if prop == bc.cv2.CAP_PROP_FOURCC else 0
+
+    cap = NegotiatingCap()
+    monkeypatch.setattr(bc.cv2, 'VideoCapture', lambda *args: cap)
+    result = bc._open(1, 1920, 1080, 20, 'dshow', 'MJPG')
+    assert result.get(bc.cv2.CAP_PROP_FOURCC) == bc.cv2.VideoWriter_fourcc(*'MJPG')
+
+
 class FakeCap:
     def __init__(self, script):
         self.script = script          # daftar hasil read(): True = frame, False = gagal
@@ -213,3 +239,60 @@ def test_sharpness_higher_for_sharp_image():
     import cv2
     blurred = cv2.GaussianBlur(sharp, (0, 0), 3)
     assert bc.sharpness(sharp) > 10 * bc.sharpness(blurred)
+
+
+def test_realsense_depth_is_aligned_and_paired_with_its_colour_frame(monkeypatch):
+    # camera.depth: true -> colour + depth streams, depth aligned to colour, depth_for(frame) gives that frame's depth
+    import sys
+    import types
+    streams, n = [], {"i": 0}
+
+    class Img:
+        def __init__(self, a):
+            self.a = a
+
+        def __bool__(self):
+            return True
+
+        def get_data(self):
+            return self.a
+
+    class Frames:
+        def __init__(self, i):
+            self.i = i
+
+        def get_color_frame(self):
+            return Img(np.full((800, 1280, 3), self.i, np.uint8))
+
+        def get_depth_frame(self):
+            return Img(np.full((800, 1280), 600 + self.i, np.uint16))
+
+    class Config:
+        def enable_stream(self, *a):
+            streams.append(a)
+
+    intr = types.SimpleNamespace(fx=640.0, fy=640.0, ppx=640.0, ppy=400.0, width=1280, height=800)
+    prof = types.SimpleNamespace(
+        get_stream=lambda s: types.SimpleNamespace(as_video_stream_profile=lambda: types.SimpleNamespace(get_intrinsics=lambda: intr)),
+        get_device=lambda: types.SimpleNamespace(first_depth_sensor=lambda: types.SimpleNamespace(get_depth_scale=lambda: 0.001)))
+
+    class Pipeline:
+        def start(self, cfg):
+            return prof
+
+        def stop(self):
+            pass
+
+        def wait_for_frames(self, timeout=5000):
+            n["i"] += 1
+            return Frames(n["i"])
+
+    rs = types.SimpleNamespace(config=Config, pipeline=Pipeline, align=lambda s: types.SimpleNamespace(process=lambda f: f),
+                               stream=types.SimpleNamespace(color="color", depth="depth"),
+                               format=types.SimpleNamespace(bgr8="bgr8", z16="z16"))
+    monkeypatch.setitem(sys.modules, "pyrealsense2", rs)
+    cam, idx, size = bc.open_camera({"backend": "realsense", "width": 1280, "height": 800, "fps": 30, "depth": True})
+    assert ("depth", 1280, 720, "z16", 30) in streams and cam.intrinsics["fx"] == 640.0
+    ok1, f1 = cam.read()
+    ok2, f2 = cam.read()
+    assert abs(float(cam.depth_for(f1)[0, 0]) - 0.602) < 1e-6 and abs(float(cam.depth_for(f2)[0, 0]) - 0.603) < 1e-6

@@ -274,6 +274,14 @@ class SelectionSession:
     def ocr_allowed(self) -> bool:
         return self.phase not in (CEK_RAK, RAK_KOSONG)
 
+    def start_searching(self) -> None:
+        """Target lock (src/box_lock.py): search from the first frame instead of counting the shelf first. The count
+        goes on in the background (_count) and is reported once; it is only needed to say NOT FOUND, which a locked
+        search never concludes (the full search takes over first)."""
+        if self.phase == CEK_RAK:
+            self.phase = MENCARI
+            self.message = f"SEARCHING {self.req}"
+
     @property
     def color(self) -> str:
         return PHASE_COLOR[self.phase]
@@ -346,7 +354,10 @@ class SelectionSession:
             # yang DIAM di rak: kotak yang sedang dipegang / ditarik tidak menambah jumlah (uji 30-09: 20 kotak di
             # rak tercatat 22 -> akhirnya "baru 19 dari 22 terlihat")
             rest = int(statistics.median(r for _, _, r in win))
+            first = self.shelf_n == 0
             self.shelf_n = max(self.shelf_n, rest + len(self.taken))
+            if first and self.shelf_n:                     # counted while already searching (start_searching)
+                self._event(now, "BOX COUNT", None, f"{self.shelf_n} boxes on the shelf")
 
     def _check_shelf(self, now):
         if self._ready:
@@ -372,7 +383,10 @@ class SelectionSession:
         tracks = tracker.tracks
         states = {tid: t["state"] for tid, t in tracks.items()}
         need = self.need
-        match_all = [tid for tid in ids if tid in states and states[tid].stable(need) == MATCH]
+        # a box whose lock would be cancelled right away (e.g. 2 contradicting readings in the window) is not picked:
+        # stress test 15-10 K07, PICK / PICK CANCELLED 17 times in 2 s on the same readings
+        match_all = [tid for tid in ids if tid in states and states[tid].stable(need) == MATCH
+                     and pick_status(states[tid])[0] != "batal"]
         shelf_ok = {tid: on_shelf(tracker, ids, polys, tid) for tid in match_all}
         match_vis = {tid: states[tid] for tid in match_all if shelf_ok[tid][0]}
         if match_all and not match_vis:
@@ -546,7 +560,10 @@ class SelectionSession:
             others = [t for t in ids if t != tid]
             sure = sum(1 for t in others if tracker.tracks[t]["state"].stable(self.need) in DONE)
             if self.solid:
-                self.message = f"FOUND: PICK #{tid} {req}" + (f" ({st.last_reason})" if st.last_reason else "")
+                # the sources of the decision (readings combined), not the reason of the last reading alone: that one
+                # often reads "only text matches" while the PICK rests on text + REF of earlier readings (16-10 demo)
+                why_pick = st.combined_sources() or st.last_reason
+                self.message = f"FOUND: PICK #{tid} {req}" + (f" ({why_pick})" if why_pick else "")
             else:
                 self.message = f"FOUND: #{tid} {req} - rechecking, do NOT take it yet ({why})"
             self.detail = ((f"{len(others)} other boxes are not picked ({sure} certainly not the target)" if others else "")

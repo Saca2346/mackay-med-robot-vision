@@ -145,3 +145,13 @@ def test_parse_request_rejects_unclear_requests():
                 "angiolite 29 x 2.5"):                # tertukar: diameter 29 mm tidak masuk akal
         with pytest.raises(ValueError):
             parse_request(bad)
+
+
+def test_mentor_task_requests_are_understood():
+    from src.box_verifier import parse_request
+    r = parse_request("Braun, DCB, 2.75mm, 30mm")
+    assert (r.product, r.diameter, r.length) == ("sequent please neo", 2.75, 30.0)
+    r = parse_request("Chroma, 2.75 , 33")
+    assert (r.product, r.diameter, r.length) == ("chroma", 2.75, 33.0)
+    r = parse_request("b braun sequent please neo 3.5 x 20")
+    assert (r.product, r.diameter, r.length) == ("sequent please neo", 3.5, 20.0)

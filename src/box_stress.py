@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 CONFIRM_S = 2.0          # AMBIL harus bertahan sekian detik (tidak langsung BATAL) supaya dihitung berhasil
 TIDAK_ADA_HOLD_S = 3.0
+PICK_NOT_TAKEN = "PICK NOT TAKEN"   # list mode: verified, but the box was not taken within the time limit
 OK = ("PICK", "TAKEN")  # results that count as found   # TIDAK ADA bertahan sekian detik -> barang berikutnya
 
 
@@ -121,7 +122,8 @@ class StressRun:
         if self._tidak_ada is not None and now - self._tidak_ada >= TIDAK_ADA_HOLD_S:
             return "NOT FOUND"
         if now - self._t0 >= self.per_item_s:
-            return "TIMEOUT"
+            # list mode: the box WAS found and verified but nobody took it (15-10: 20 "TIMEOUT" hid 3 real PICKs)
+            return PICK_NOT_TAKEN if self.until_taken and self._found is not None else "TIMEOUT"
         return None
 
     def elapsed(self, now: float) -> float:
@@ -131,7 +133,7 @@ class StressRun:
         step = self.current
         reads = stats.get("reads", 0) - self._base[0]
         ms = stats.get("ocr_ms", 0.0) - self._base[1]
-        found = self._found if result in ("PICK", "TAKEN") else None
+        found = self._found if result in ("PICK", "TAKEN", PICK_NOT_TAKEN) else None
         row = {"no": sum(1 for s in self.steps[:self.idx + 1] if s.kind == "req"), "bagian": step.section,
                "permintaan": step.text, "catatan": step.note, "hasil": result,
                "detik": f"{(found[0] - self._t0) if found else now - self._t0:.1f}",
@@ -172,9 +174,11 @@ class StressRun:
             rows = self.rows if sec == "ALL" else [r for r in self.rows if r["bagian"] == sec]
             ok = [float(r["detik"]) for r in rows if r["hasil"] in OK]
             med = f", median {statistics.median(ok):.1f} s, max {max(ok):.1f} s" if ok else ""
+            not_taken = sum(r["hasil"] == PICK_NOT_TAKEN for r in rows)
             out.append(f"{sec or '(no section)'}: PICK {len(ok)}/{len(rows)}{med}"
                        f", timeout {sum(r['hasil'] == 'TIMEOUT' for r in rows)}"
-                       f", NOT FOUND {sum(r['hasil'] == 'NOT FOUND' for r in rows)}"
+                       + (f", PICK but not taken {not_taken}" if not_taken else "")
+                       + f", NOT FOUND {sum(r['hasil'] == 'NOT FOUND' for r in rows)}"
                        f", cancelled {sum(int(r['batal']) for r in rows)}")
         fails = [r for r in self.rows if r["hasil"] not in OK]
         if fails:

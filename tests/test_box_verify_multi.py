@@ -192,6 +192,19 @@ def test_split_decimal_is_uncertain_not_contradicting():
     assert text("2 75 mm").diameter_ok is False
 
 
+def test_two_integers_that_cannot_be_a_split_decimal_are_diameter_and_length():
+    """Webcam 20-10, Angiolite 4 x 19: the size label was read "4" "19" for 6 s; 4.19 mm is no diameter (multiples of
+    0.25 mm), so it is 4 x 19. A split decimal that IS possible ("2" "75") stays uncertain (test above)."""
+    ident = text("angiolite", "4", "19")
+    # "4" without "mm" stays a supporting diameter hint (existing rule), the length 19 is read
+    assert ident.diameter_hint == 4.0 and ident.length == 19 and ident.length_ok
+    ev = Evidence(text=text("angiolite", "SCCDSR14150400019", "4", "19"), refs=parse_refs("SCCDSR14150400019"))
+    assert run(ev, Request("angiolite", 4.0, 19.0))[0] == MATCH     # text + REF, as on the label
+    ev = Evidence(text=text("angiolite", "4", "19"), refs=parse_refs("SCCDSR14150250029"))
+    assert run(ev, Request("angiolite", 4.0, 19.0))[0] != MATCH     # a REF of another size still contradicts
+    assert text("3", "25").diameter_ok is False                     # 3.25 or 3 x 25: still uncertain
+
+
 def test_diameter_symbol_read_as_8():
     """Bacaan nyata Nagomi foto 35: '8' '3.0' 'mm' '<L>' '24' 'mm' untuk '⌀ 3.0 mm <L> 24 mm'."""
     ident = text("Ultimaster Nagomi", "8", "3.0", "mm", "<L>", "24", "mm")
@@ -412,3 +425,32 @@ def test_broken_date_fragments_are_not_sizes():
     assert t.length == 19 and t.length_ok and not any("several" in n for n in t.notes)
     assert text("accuforce", "2.75-20").key()[1:] == (2.75, 20)                 # format ukuran Terumo tetap terbaca
     assert text("15", "2", "2029-09-21").diameter_hint is None                 # sisa "2,5" terpotong: bukan petunjuk
+
+
+# ------------------------------------------------------------------ misread Terumo REF (stress test 15-10)
+def _ev(read_text, ref_text):
+    from src.box_ref import parse_ref_hints
+    return Evidence(text=read_text, refs=parse_refs(ref_text), ref_hints=parse_ref_hints(ref_text))
+
+
+def test_impossible_terumo_digit_supports_but_never_contradicts():
+    # K07 REF DC-RM2512HHW was read DC-RM2812HHW 13 times out of 20: 2.8 mm does not exist, so it is 2.5 or 2.0
+    from src.box_ref import parse_ref_hints
+    assert parse_refs("DC-RM2812HHW") == []
+    (h,) = parse_ref_hints("DC-RM2812HHW")
+    assert h.product == "accuforce" and set(h.alts) == {2.5, 2.0} and h.length == 12
+    ev = _ev(text("Accuforce", "2.5", "12"), "DC-RM2812HHW")
+    assert decide_multi(ev, Request("accuforce", 2.5, 12.0), today=TODAY)[0] == MATCH
+    # another request: the hint is silent, it never turns into "ignored" by itself
+    assert decide_multi(_ev(None, "DC-RM2812HHW"), Request("accuforce", 2.75, 20.0), today=TODAY)[0] != IGNORED
+    # a different length is not supported
+    assert decide_multi(_ev(text("Accuforce", "2.5", "15"), "DC-RM2812HHW"), Request("accuforce", 2.5, 15.0),
+                        today=TODAY)[0] == CANDIDATE
+
+
+def test_hint_alone_or_valid_misread_is_not_enough():
+    # hint without the size text = one source only
+    assert decide_multi(_ev(None, "DC-RM2812HHW"), Request("accuforce", 2.5, 12.0), today=TODAY)[0] == CANDIDATE
+    # a misread to ANOTHER valid size (K16 2720 read 3720 = 3.75) still contradicts: no PICK, as before
+    ev = _ev(text("Accuforce", "2.75", "20"), "DC-RM3720HHW")
+    assert decide_multi(ev, Request("accuforce", 2.75, 20.0), today=TODAY)[0] == CONFIRM

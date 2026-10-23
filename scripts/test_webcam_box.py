@@ -74,7 +74,9 @@ from src.box_session import DITEMUKAN, RAK_KOSONG, SELESAI, TIDAK_ADA, Selection
 from src.box_stress import StressRun, load_plan
 from src.box_stream import LatestFrame, MjpegReader, VideoRecorder, load_times
 from src.box_verifier import (CANDIDATE, CONFIRM, EMPTY, EXPIRED, IGNORED, MATCH, READING, SimpleTracker,
-                              describe_request, pick_fefo)
+                              combined_score, describe_request, pick_fefo)
+from src.box_lock import TargetLock, as_place_map, as_slot_map, lock_order
+from src.box_crops import overlay
 from src.config import load_config, resolve
 import src.box_verifier as box_verifier  # noqa: E402  (module flag REQUIRED_EXPIRY)
 
@@ -82,6 +84,7 @@ COLORS = {  # BGR
     "stage1": (255, 170, 0), "label": (0, 140, 255),
     MATCH: (0, 200, 0), IGNORED: (150, 150, 150), CONFIRM: (0, 215, 255), READING: (255, 255, 255),
     CANDIDATE: (255, 230, 0), EXPIRED: (255, 0, 200),      # kedaluwarsa = ungu (merah khusus TIDAK ADA / RAK KOSONG)
+    "lock": (250, 250, 250),                               # target lock: the one box being read (src/box_lock.py)
 }
 PHASE_BGR = {"white": (255, 255, 255), "red": (0, 0, 230), "green": (0, 200, 0), "yellow": (0, 215, 255)}
 TAGS = {MATCH: "MATCH", IGNORED: "", CONFIRM: "CONFIRM", READING: "reading...", CANDIDATE: "CANDIDATE",
@@ -89,6 +92,8 @@ TAGS = {MATCH: "MATCH", IGNORED: "", CONFIRM: "CONFIRM", READING: "reading...", 
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp"}
 NEXT_AFTER_TIDAK_ADA_S = 3.0   # pesanan beberapa barang: TIDAK ADA bertahan sekian detik -> barang berikutnya
 SLOW_S = 1.0          # iterasi lebih lama dari ini dicetak sebagai [lambat]
+PANEL_S = 12.0        # crops panel of the PICK box stays on screen this long (src/box_crops.py)
+WINDOW = "Box pipeline (q quit, v all boxes / target only, a shelf area, s save, b scan details, r request again, o read again)"
 LOG_FIELDS = ["time", "request", "track", "state", "reason", "gtin", "lot", "expiry", "text"]
 
 
@@ -119,9 +124,10 @@ def _raw_str(ev) -> str:
 def apply_reading(st, ev, decision, reason, key, ms, n, stats=None, epoch=None):
     if READ_LOG is not None:
         READ_LOG.write(f"{time.monotonic():.2f},{st.tid},{epoch if epoch is not None else ''},{st.epoch},"
-                       f"{decision},\"{_identity_str(ev)}\",\"{_raw_str(ev)}\"\n")
+                       f"{decision},\"{_identity_str(ev)}\",\"{_raw_str(ev)}\",{ms:.0f},{n}\n")
         READ_LOG.flush()
-    st.pending = False
+    st.inflight = max(0, st.inflight - 1)
+    st.pending = st.inflight > 0
     if stats is not None:
         stats["ocr_calls"] += n
         stats["ocr_ms"] += ms
@@ -148,9 +154,11 @@ class OcrWorker:
     """OCR + barcode di thread latar belakang (0,5-3 detik per crop di CPU laptop) supaya jendela video tidak
     membeku. Beberapa pembaca (`ocr.workers`, tiap thread punya mesin OCR sendiri) untuk CPU server yang kuat."""
 
-    def __init__(self, readers, cfg, req, catalog, max_pending: int | None = None):
+    def __init__(self, readers, cfg, req, catalog, max_pending: int | None = None, read_fn=None):
         readers = readers if isinstance(readers, list) else [readers]
         self.cfg, self.req, self.catalog = cfg, req, catalog
+        self.n_readers = len(readers)
+        self.read_fn = read_fn or read_evidence
         # antrean pendek: crop yang menunggu lama sudah basi (kamera sudah pindah), lebih baik ambil yang baru
         self.jobs: queue.Queue = queue.Queue(maxsize=max_pending or len(readers) + 1)
         self.results: queue.Queue = queue.Queue()
@@ -164,16 +172,37 @@ class OcrWorker:
         except queue.Full:
             return False
 
+    def keep_only(self, keep) -> int:
+        """Drop queued crops (not yet being read) of boxes that are not in `keep` (TrackStates). Read order only:
+        a dropped crop gives no observation at all, the box is simply read again later. Returns the number dropped."""
+        kept, dropped = [], 0
+        while True:
+            try:
+                job = self.jobs.get_nowait()
+            except queue.Empty:
+                break
+            if any(job[0] is st for st in keep):
+                kept.append(job)
+            else:
+                job[0].inflight = max(0, job[0].inflight - 1)
+                job[0].pending = job[0].inflight > 0
+                dropped += 1
+        for job in kept:
+            self.jobs.put_nowait(job)
+        return dropped
+
     def _loop(self, reader) -> None:
         while True:
             st, crops, epoch = self.jobs.get()
             req = self.req                           # permintaan saat crop ini DIBACA (bisa berganti sesudahnya)
             try:
+                kw = {"attempt": st.reads} if getattr(self.read_fn, "uses_attempt", False) else {}
                 self.results.put((st, epoch, req,
-                                  *read_evidence(*crops, reader, self.cfg, req, self.catalog)))
+                                  *self.read_fn(*crops, reader, self.cfg, req, self.catalog, **kw)))
             except Exception as e:  # noqa: BLE001 - satu crop gagal tidak boleh mematikan thread baca
                 print(f"[ocr] failed: {type(e).__name__}: {e}")
-                st.pending = False
+                st.inflight = max(0, st.inflight - 1)
+                st.pending = st.inflight > 0
 
     def drain(self):
         while True:
@@ -206,17 +235,18 @@ HINT_MIN = 0.80        # kemiripan tampilan dengan kotak inventaris yang dicari:
 HINT_EVERY = 10        # kemiripan tiap kotak dihitung ulang tiap 10 frame (atau setelah nomor kotak diragukan)
 
 
-def update_hints(frame, groups, ids, tracker, targets, frame_idx):
+def update_hints(frame, groups, ids, tracker, targets, frame_idx, compare=None, early=False):
     """Kemiripan punggung tiap kotak dengan kotak inventaris yang dicari (src/box_inventory.signature). Hanya
     menentukan URUTAN baca: kotak yang dipindah tetap ditemukan lebih dulu; keputusan AMBIL tetap dari verifikasi."""
+    every = 2 if early else HINT_EVERY
     for g, tid in zip(groups, ids):
         if tid < 0:
             continue
         st = tracker.state(tid)
-        if frame_idx - st.hint_frame < HINT_EVERY or box_width_px(g.box.poly) < 16:
+        if frame_idx - st.hint_frame < every or box_width_px(g.box.poly) < 16:
             continue
         sig = signature(spine_crop(frame, g.box.poly))
-        best = max(((similarity(sig, t_sig), bid) for bid, t_sig in targets), default=(0.0, ""))
+        best = max((((compare or similarity)(sig, t_sig), bid) for bid, t_sig in targets), default=(0.0, ""))
         st.hint, st.hint_id, st.hint_frame = best[0], best[1], frame_idx
 
 
@@ -282,7 +312,8 @@ def load_roi(arg, live):
 
 def process(frame, det, reader, tracker, req, cfg, frame_idx, ocr_all=False, stats=None, worker=None,
             catalog=None, motion_est=None, need=2, dt=None, session=None, now=0.0, targets=None, roi=None,
-            det_big=None, cascade_cfg=None):
+            det_big=None, cascade_cfg=None, lock=None, slots=None, places=None, read_enabled=True, hint_compare=None,
+            read_order=None):
     """Deteksi + (Tahap 2) alur penyeleksi + baca bukti. Dengan worker, pembacaan dikirim ke thread latar.
     ids berisi -1 pada frame yang gerakan kameranya tidak terukur (kotak tidak dicocokkan ke nomor lama).
     det_big: model kedua (lebih besar/presisi), dipanggil cuma pada kotak kandidat lewat refine_candidates
@@ -346,8 +377,24 @@ def process(frame, det, reader, tracker, req, cfg, frame_idx, ocr_all=False, sta
         # a box number dropped by TAKEN in this frame: treat that box as unmatched until the next frame
         ids = [t if t < 0 or t in tracker.tracks else -1 for t in ids]
     if targets and blur <= max_motion:
-        update_hints(frame, groups, ids, tracker, targets, frame_idx)
-    if req is not None and (session is None or session.ocr_allowed):
+        # Camera colour can settle after its first frame. Refresh reading hints
+        # while the focused view starts; appearance never supplies identity.
+        early_hints = (read_order is not None and req is not None and req.diameter is not None and frame_idx < 15
+                       and cfg.get("visual", {}).get("early_hint_refresh", True))
+        update_hints(frame, groups, ids, tracker, targets, frame_idx, compare=hint_compare, early=early_hints)
+        if lock is not None:
+            lock.update(now, groups, ids, tracker, need, slots or {}, [b for b, _ in targets], places, (w, h))
+    if read_order is not None and worker is not None:
+        # Fast visual mode: a read may finish during detection/motion work.
+        # Consume it now so its next fresh crop need not wait another frame.
+        # Tracker epochs have already been updated, so pre-motion crops cannot
+        # revive an uncertain identity.
+        for st, epoch, jreq, ev, decision, reason, key, ms, n in worker.drain():
+            if req is not None and jreq is not req:
+                decision, reason, key, ev.support = redecide(ev, req, cfg, catalog)
+            apply_reading(st, ev, decision, reason, key, ms, n, stats=stats, epoch=epoch)
+            ocr_ms = ms
+    if read_enabled and req is not None and (session is None or session.ocr_allowed):
         n_read = 0
         # kamera bergerak -> frame buram karena gerakan: jangan buang waktu OCR (2-4 s per kotak di CPU laptop)
         still = ocr_all or blur <= max_motion
@@ -374,11 +421,29 @@ def process(frame, det, reader, tracker, req, cfg, frame_idx, ocr_all=False, sta
 
         due = sorted(range(len(groups)), key=priority)
         budget = len(groups) if ocr_all else cfg["ocr"]["max_crops_per_frame"]
+        locked = None if ocr_all else lock_order(lock, session.pick if session is not None else None)
+        if read_order is not None and not ocr_all:
+            locked = read_order(groups, ids, tracker, lock, need)
+            if locked and worker is not None and cfg.get("visual", {}).get("drop_stale_reads", True):
+                # crops of other boxes queued during the full search would run before the target's next read
+                # (D455 22-10, K10: MATCH at 1.10 s, five queued reads of other boxes, second target read 2.79 s)
+                getattr(worker, "keep_only", lambda keep: 0)([tracker.state(t) for t in locked if t in tracker.tracks])
+        if locked is not None:
+            # target lock (src/box_lock.py): ONLY the locked box (and the PICK box) is read, again as soon as its
+            # previous reading is done; the other boxes are detected and tracked but not read
+            due = [i for t in locked for i in range(len(groups)) if ids[i] == t]
+            budget = len(due)
         for i in due:
             if ids[i] < 0:
                 continue
             st = tracker.state(ids[i])
-            if not still or n_read >= budget or st.pending or (not ocr_all and st.next_ocr_frame > frame_idx):
+            # the locked target may have one read per OCR worker in flight (two consistent readings are needed, so
+            # they run side by side instead of one after the other); every other box keeps a single read
+            busy = st.pending and not (locked is not None and worker is not None
+                                       and cfg.get("visual", {}).get("parallel_target_reads", True)
+                                       and st.inflight < getattr(worker, "n_readers", 1))
+            if not still or n_read >= budget or busy or (not ocr_all and locked is None
+                                                         and st.next_ocr_frame > frame_idx):
                 continue
             # kotak AMBIL / kandidat (merek & produk sama, ukuran belum pasti) dibaca ulang lebih sering: bukti keduanya
             # yang ditunggu; kotak lain cukup sesekali
@@ -389,8 +454,10 @@ def process(frame, det, reader, tracker, req, cfg, frame_idx, ocr_all=False, sta
             n_read += 1
             crops = prepare_crops(frame, groups[i], cfg)
             if worker is not None:
-                st.pending = worker.submit(st, crops)
-                if not st.pending:
+                submitted = worker.submit(st, crops)
+                st.inflight += int(submitted)
+                st.pending = st.inflight > 0
+                if not submitted:
                     st.next_ocr_frame = frame_idx + 1      # antrean penuh: coba lagi di frame berikutnya
                 continue
             ev, decision, reason, key, ms, n = read_evidence(*crops, reader, cfg, req, catalog)
@@ -399,7 +466,10 @@ def process(frame, det, reader, tracker, req, cfg, frame_idx, ocr_all=False, sta
     return dets, groups, orphans, ids, det_ms, ocr_ms
 
 
-def draw(frame, groups, orphans, ids, tracker, req, need, hud, session=None):
+def draw(frame, groups, orphans, ids, tracker, req, need, hud, session=None, view="target", lock=None):
+    """view "target": with a request only ONE box is drawn: the target once it is PICK (green), before that the
+    locked box (white, being read: src/box_lock.py) or, without a lock, the best candidate (blue, one source, not
+    verified). view "all": every box with its reading state (diagnosis)."""
     vis = frame.copy()
     ui = hud.get("ui", 1.0)                          # >1 kalau tampilan diperkecil (--view-width): huruf diperbesar
     counts = {s: 0 for s in TAGS}
@@ -407,9 +477,11 @@ def draw(frame, groups, orphans, ids, tracker, req, need, hud, session=None):
         pick = session.pick
     else:
         pick = pick_fefo({t: tracker.state(t) for t in ids if t >= 0}, need) if req is not None else None
+    only_target = view == "target" and req is not None
     for g, tid in zip(groups, ids):
-        for lab in g.labels:
-            draw_poly(vis, lab.poly, COLORS["label"], 1)
+        if not only_target:
+            for lab in g.labels:
+                draw_poly(vis, lab.poly, COLORS["label"], 1)
         p = to_poly(g.box.poly)
         top = p[np.argmin(p[:, 1])]
         if req is None:
@@ -417,12 +489,20 @@ def draw(frame, groups, orphans, ids, tracker, req, need, hud, session=None):
             put_label(vis, f"#{tid} box {g.box.conf:.2f}", (top[0], top[1] - 4), COLORS["stage1"], 0.45 * ui)
             continue
         if tid < 0:                                  # gerakan kamera tidak terukur di frame ini: belum dicocokkan
-            draw_poly(vis, p, COLORS[READING], 1)
+            if not only_target:
+                draw_poly(vis, p, COLORS[READING], 1)
             continue
         st = tracker.state(tid)
         s = st.stable(need)
         counts[s] += 1
         held = tid == pick and session is not None and not session.solid
+        if only_target:
+            if tid == pick:                          # the one bounding box: the verified target
+                draw_poly(vis, p, COLORS[CONFIRM] if held else COLORS[MATCH], 5)
+                text = (f"TARGET #{tid} {req}" + (" - rechecking" if held else "")
+                        + (f" | exp {st.expiry.isoformat()}" if st.expiry and not held else ""))
+                put_label(vis, text, (top[0], top[1] - 4), COLORS[CONFIRM] if held else COLORS[MATCH], 0.55 * ui)
+            continue
         if held:                                     # dikunci, tapi bacaan terakhir kurang lengkap: jangan diambil
             draw_poly(vis, p, COLORS[CONFIRM], 4)
             text = f"#{tid} PICK? rechecking"
@@ -446,8 +526,43 @@ def draw(frame, groups, orphans, ids, tracker, req, need, hud, session=None):
         if st.hint >= HINT_MIN and tid != pick and s in (READING, CONFIRM, CANDIDATE):
             text += f" | looks like {st.hint_id}"            # petunjuk dari inventaris (belum diverifikasi)
         put_label(vis, text, (top[0], top[1] - 4), label_color, 0.45 * ui)
-    for lab in orphans:
-        draw_poly(vis, lab.poly, COLORS["label"], 1)
+    locked_tid = lock.tid if lock is not None and lock.active else None
+    if only_target and pick is None and locked_tid is not None and locked_tid in ids:
+        # target lock: the one box being read (not verified yet)
+        g = groups[ids.index(locked_tid)]
+        p = to_poly(g.box.poly)
+        top = p[np.argmin(p[:, 1])]
+        draw_poly(vis, p, COLORS["lock"], 4)
+        st = tracker.state(locked_tid)
+        put_label(vis, f"LOCKED #{locked_tid} {req} - looks like {lock.box_id}, "
+                  + ("1 source only: move closer / scan barcode" if lock.one_source else "verifying")
+                  + (f" ({st.combined_sources()})" if st.combined_sources() else ""),
+                  (top[0], top[1] - 4), COLORS["lock"], 0.55 * ui)
+    elif only_target and pick is None:
+        # no verified target yet: show the ONE best candidate, clearly marked as not verified. Ranked by its combined
+        # evidence; a box whose evidence does not cover the requested size (e.g. only the brand name read: on a shelf
+        # of one brand that is every box) is never shown as the target (task 2, 15-10: 17 such boxes).
+        cands = []
+        for g, t in zip(groups, ids):
+            st = tracker.state(t) if t >= 0 else None
+            if st is None or st.stable(need) != CANDIDATE:
+                continue
+            atoms = frozenset().union(*[a for a, _ in st.support]) if st.support else frozenset()
+            score = combined_score(atoms)[0]
+            if score >= 1:
+                cands.append(((score, len(atoms), len(st.history), -t), g, t, st))
+        if cands:
+            _, g, tid, st = max(cands, key=lambda c: c[0])
+            p = to_poly(g.box.poly)
+            top = p[np.argmin(p[:, 1])]
+            draw_poly(vis, p, COLORS[CANDIDATE], 4)
+            src = st.combined_sources() or "1 source"
+            put_label(vis, f"CANDIDATE #{tid} {req} - {src} only, needs a 2nd source"
+                      + (f" (+{len(cands) - 1} more)" if len(cands) > 1 else ""),
+                      (top[0], top[1] - 4), COLORS[CANDIDATE], 0.55 * ui)
+    if not only_target:
+        for lab in orphans:
+            draw_poly(vis, lab.poly, COLORS["label"], 1)
     rate = (f"shown {hud['real']:.1f} fps" + (f" | input {hud['inrate']:.1f} fps" if hud.get("inrate") is not None
                                                   else "") + f" | process max {hud['fps']:.0f} fps"
             if hud.get("real") is not None else f"FPS {hud['fps']:.1f}")
@@ -476,10 +591,18 @@ def draw(frame, groups, orphans, ids, tracker, req, need, hud, session=None):
             lines.append((detail, (40, 40, 40)))
         if session.warning:
             lines.append((session.warning, COLORS[CONFIRM]))
-        lines.append((f"green PICK {int(pick is not None)} | grey {counts[IGNORED]} not target | yellow "
-                      f"{counts[CONFIRM]} unsure | blue {counts[CANDIDATE]} candidate | white {counts[READING]} reading"
-                      + (f" | purple {counts[EXPIRED]} expired" if counts[EXPIRED] else "")
-                      + f" | OCR {hud['ocr_ms']:.0f} ms", (40, 40, 40)))
+        if only_target:
+            mode = (f"target lock: only #{locked_tid} is read, {len(groups) - 1} other boxes detected, not read"
+                    if locked_tid is not None else
+                    f"full search: {len(groups)} boxes read in the background" + (f" ({lock.fallback})"
+                                                                               if lock is not None and lock.fallback
+                                                                               else ""))
+            lines.append((f"{mode} | v = show all boxes", (40, 40, 40)))
+        else:
+            lines.append((f"green PICK {int(pick is not None)} | grey {counts[IGNORED]} not target | yellow "
+                          f"{counts[CONFIRM]} unsure | blue {counts[CANDIDATE]} candidate | white {counts[READING]} "
+                          f"reading" + (f" | purple {counts[EXPIRED]} expired" if counts[EXPIRED] else "")
+                          + f" | OCR {hud['ocr_ms']:.0f} ms | v = target only", (40, 40, 40)))
     elif req is not None:
         lines.append((f"request: {req} | MATCH {counts[MATCH]} | CANDIDATE {counts[CANDIDATE]} | CONFIRM "
                       f"{counts[CONFIRM]} | EXP {counts[EXPIRED]} | reading {counts[READING]} | OCR {hud['ocr_ms']:.0f} ms",
@@ -497,7 +620,34 @@ def draw(frame, groups, orphans, ids, tracker, req, need, hud, session=None):
             lines.append(("target not verified yet", (40, 40, 40)))
     for k, (line, color) in enumerate(lines):
         put_label(vis, line, (10, int((28 + 26 * k) * ui)), color, 0.6 * ui)
+    # FPS badge (meeting 15-10: show the speed on the output): frames really shown per second, detector time
+    fps_val = hud["real"] if hud.get("real") is not None else hud["fps"]
+    det_fps = 1000.0 / hud["det_ms"] if hud.get("det_ms") else 0.0
+    badge = f"FPS {fps_val:.1f} | detector {det_fps:.0f} FPS ({hud['det_ms']:.0f} ms)"
+    (bw, _), _ = cv2.getTextSize(badge, cv2.FONT_HERSHEY_SIMPLEX, 0.9 * ui, 2)
+    put_label(vis, badge, (vis.shape[1] - bw - int(16 * ui), int(32 * ui)), (0, 200, 0), 0.9 * ui)
     return vis, counts, pick
+
+
+def evidence_summary(st) -> str:
+    """What was read on a box, for the audit log: sizes read from the text and the REF codes of the stored readings
+    (the 60-character text of the last reading alone could not show why a combined PICK was made)."""
+    sizes, refs = [], []
+    for ev in st.evs:
+        if ev is None:
+            continue
+        t = ev.text
+        if t is not None and (t.diameter is not None or t.length is not None):
+            d = f"{t.diameter:g}" if t.diameter is not None else "?"
+            ln = f"{t.length:g}" if t.length is not None else "?"
+            sizes.append(f"{t.product or '?'} {d} x {ln}")
+        refs += [h.text for h in ev.refs]
+    out = []
+    if sizes:
+        out.append("text " + ", ".join(dict.fromkeys(sizes)))
+    if refs:
+        out.append("REF " + ", ".join(dict.fromkeys(refs)))
+    return " | ".join(out)
 
 
 def log_transitions(path, req, ids, tracker, need, pick, session_events=()):
@@ -512,11 +662,13 @@ def log_transitions(path, req, ids, tracker, need, pick, session_events=()):
         if s in ("PICK", MATCH, EXPIRED) and st.logged != s:
             st.logged = s
             rows.append([datetime.now().isoformat(timespec="seconds"), str(req), tid, s, st.last_reason, st.gtin,
-                         st.lot, st.expiry.isoformat() if st.expiry else "", st.last_text])
+                         st.lot, st.expiry.isoformat() if st.expiry else "",
+                         " || ".join(x for x in (evidence_summary(st), st.last_text) if x)])
     for _, what, tid, reason, st in session_events:
         rows.append([datetime.now().isoformat(timespec="seconds"), str(req), "" if tid is None else tid, what, reason,
                      st.gtin if st else "", st.lot if st else "",
-                     st.expiry.isoformat() if st and st.expiry else "", st.last_text if st else ""])
+                     st.expiry.isoformat() if st and st.expiry else "",
+                     " || ".join(x for x in (evidence_summary(st), st.last_text) if x) if st else ""])
     if rows:
         new = not path.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -645,6 +797,83 @@ def iter_source(args, cfg, info):
         live.stop()
 
 
+def pick_output(out_dir, req, tid, ids, groups, frame, st, box_id="", reader=None):
+    """PICK -> crops of the box (spine, barcode, size label: src/box_crops.py) + structured output, saved to
+    out_dir/<time>_<box>/ -> (panel image, extra grasp.jsonl fields). Response to the review, Figure 2."""
+    from src.box_barcode import decode_gs1
+    from src.box_crops import panel, pick_crops
+    from src.box_verifier import brand_of
+    if tid not in ids:
+        return None, {}
+    crops = pick_crops(frame, groups[ids.index(tid)], decode_gs1)
+    ref = next((h.text for ev in reversed(list(st.evs)) if ev is not None for h in ev.refs
+                if h.product == req.product and h.diameter == req.diameter and h.length == req.length), "")
+    fields = {"item": req.product, "brand": brand_of(req.product),
+              "size": f"{req.diameter:g} x {req.length:g} mm" if req.diameter is not None else "",
+              "REF": ref, "GTIN": st.gtin, "LOT": st.lot, "expiry": st.expiry.isoformat() if st.expiry else "",
+              "barcode": ("decoded " + crops["barcode_text"][:22]) if crops["barcode_decoded"] else
+                         "located, not decoded" if crops["barcode"] is not None else "not found",
+              "verified by": st.combined_sources() or st.last_reason[:30],
+              "box": f"#{tid}" + (f" = {box_id}" if box_id else "")}
+    pnl = panel(crops, fields, reader=reader)
+    d = out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{tid}"
+    d.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(d / "spine.png"), crops["spine"])
+    if crops["barcode"] is not None:
+        cv2.imwrite(str(d / "barcode.png"), crops["barcode"])
+    for k, lab in enumerate(crops["size_labels"], 1):
+        cv2.imwrite(str(d / f"size_label_{k}.png"), lab)
+    cv2.imwrite(str(d / "panel.png"), pnl)
+    extra = {"barcode_px": crops["barcode_px"], "barcode_decoded": crops["barcode_decoded"],
+             "barcode_text": crops["barcode_text"]}
+    if crops["barcode_px"] is not None:
+        extra["barcode_center_px"] = np.asarray(crops["barcode_px"]).mean(axis=0).round(1).tolist()
+    (d / "result.json").write_text(json.dumps({"request": str(req), **fields, **extra}, ensure_ascii=False, indent=1),
+                                   encoding="utf-8")
+    print(f"[crops] #{tid}: spine + barcode ({'decoded' if crops['barcode_decoded'] else 'located' if crops['barcode'] is not None else 'not found'})"
+          f" + {len(crops['size_labels'])} size label(s) -> {d}")
+    return pnl, extra
+
+
+def write_grasp(path, req, tid, ids, groups, frame, live, extra=None):
+    """PICK -> one JSON line with the grasp data of the box (pixels always; 3D when the RealSense streams depth).
+    extra = barcode position from pick_output (with depth also its 3D point, for the scanner on the arm)."""
+    from src.box_grasp import grasp_info
+    if tid not in ids:
+        return
+    i = ids.index(tid)
+    depth = live.depth_for(frame) if hasattr(live, "depth_for") else None
+    intr = live.intrinsics_for(frame) if hasattr(live, "intrinsics_for") else None
+    extra = dict(extra or {})
+    no_grip = [lab.poly for lab in groups[i].labels]
+    if extra.get("barcode_px") is not None:
+        no_grip.append(extra["barcode_px"])
+    g = grasp_info(groups[i].box.poly, depth, intr,
+                   neighbours=[gr.box.poly for j, gr in enumerate(groups) if j != i and ids[j] != -1],
+                   no_grip=no_grip)
+    if extra.get("barcode_px") is not None and depth is not None and intr is not None:
+        extra["barcode_xyz_m"] = grasp_info(extra["barcode_px"], depth, intr)["xyz_m"]
+    row = {"time": datetime.now().isoformat(timespec="seconds"), "request": str(req), "track": tid, "status": "PICK",
+           "frame_size": [int(frame.shape[1]), int(frame.shape[0])], "intrinsics": intr, **g, **extra}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if depth is not None and intr is not None:
+        # GraspGen-X takes a segmented point cloud, not a box: object + labelled scene cloud next to the JSON line
+        from src.box_grasp import save_pointcloud_npz
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        cloud = save_pointcloud_npz(path.parent / f"grasp_{tid}_{stamp}.npz", groups[i].box.poly, depth, intr,
+                                    neighbours=[gr.box.poly for j, gr in enumerate(groups) if j != i and ids[j] != -1],
+                                    frame_size=[int(frame.shape[1]), int(frame.shape[0])])
+        row["pointcloud"] = cloud
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + chr(10))
+    if g["xyz_m"] is not None:
+        x, y, z = g["xyz_m"]
+        print(f"[grasp] #{tid}: camera xyz {x:+.3f} {y:+.3f} {z:.3f} m | spine {g['spine_width_mm']} x {g['spine_length_mm']} mm"
+              f" | gap L {g['gap_left_mm']} R {g['gap_right_mm']} mm | depth valid {g['depth_valid']:.0%} -> {path.name}")
+    else:
+        print(f"[grasp] #{tid}: pixels only (no valid paired depth; RealSense --depth required) -> {path.name}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="config/box_pipeline_config.yaml")
@@ -659,6 +888,20 @@ def main():
     ap.add_argument("--source", default=None,
                     help="foto / folder foto / video / URL stream (http://127.0.0.1:8090/video.mjpg), pengganti webcam")
     ap.add_argument("--no-window", action="store_true", help="jangan buka jendela (foto: hanya simpan hasil)")
+    ap.add_argument("--depth", action="store_true",
+                    help="RealSense: also stream depth (aligned to colour); every PICK writes 3D grasp data to grasp.jsonl")
+    ap.add_argument("--no-lock", action="store_true",
+                    help="turn the target lock off: every box is read (before 16-10); default: with an inventory only "
+                         "the box that looks like the requested one is read (src/box_lock.py)")
+    ap.add_argument("--lock-only", action="store_true",
+                    help="visual target tracking only: one outline, no PICK/TAKEN, grasp or inventory updates")
+    ap.add_argument("--verify-target", action="store_true",
+                    help="focused two-source verification with observed crops; no PICK/TAKEN or inventory writes")
+    ap.add_argument("--evidence-photos", default=None,
+                    help="focused modes: directory for automatic and manual paired camera/view photos")
+    ap.add_argument("--view", choices=("target", "all"), default="target",
+                    help="target (default): with a request only the target box is drawn, once verified; "
+                         "all: every detected box with its reading state (diagnosis). Key v switches while running")
     ap.add_argument("--max-frames", type=int, default=0, help="berhenti setelah N frame (uji / perbandingan)")
     ap.add_argument("--record", default=None,
                     help="simpan frame kamera ASLI (tanpa anotasi) ke video .mp4, untuk diputar ulang dengan --source "
@@ -698,6 +941,13 @@ def main():
                     help="stress test: bacaan rak dari barang sebelumnya dipakai lagi (seperti operasi biasa). "
                          "Default: tiap barang dibaca dari nol supaya waktu per kotak bisa dibandingkan")
     args = ap.parse_args()
+    if args.lock_only and args.verify_target:
+        ap.error("choose --lock-only or --verify-target")
+    if args.evidence_photos and not (args.lock_only or args.verify_target):
+        ap.error("--evidence-photos requires --verify-target or --lock-only")
+    if args.lock_only or args.verify_target:
+        from src.box_target_view import run
+        return run(args)
     stress = None
     if args.rencana:
         try:
@@ -717,9 +967,11 @@ def main():
     if args.debug_readings:
         global READ_LOG
         READ_LOG = open(args.debug_readings, "w", encoding="utf-8")
-        READ_LOG.write("t,track,job_epoch,epoch,decision,identity,teks\n")
+        READ_LOG.write("t,track,job_epoch,epoch,decision,identity,teks,ocr_ms,ocr_calls\n")
 
     cfg = load_config(resolve(args.config))
+    if args.depth:
+        cfg["camera"]["depth"] = True
     req, orders = None, None
     if args.request:
         try:
@@ -744,7 +996,8 @@ def main():
           f"(the first time on a GPU can take 10-60 s, wait for the window) ...", flush=True)
     t_load = time.perf_counter()
     det = BoxDetector(str(weights), cfg["model"]["task"], cfg["model"]["imgsz"], cfg["model"]["device"],
-                      cfg["model"]["conf"], cfg["model"]["iou"], cfg["classes"])
+                      cfg["model"]["conf"], cfg["model"]["iou"], cfg["classes"],
+                      fixed_input=bool(cfg["model"].get("fixed_input", False)))
     cfg["model"]["imgsz"], cfg["model"]["device"] = det.imgsz, det.device
     cascade_cfg = cfg["model"].get("cascade") or {}
     det_big = None
@@ -782,15 +1035,27 @@ def main():
     inv = Inventory(resolve(args.inventaris)) if args.inventaris else None
     if inv is not None and not inv.boxes:
         sys.exit(f"Inventory empty / missing: {inv.path}. Run scripts/rak_inventaris.py pindai + cek first.")
+    slots: dict = {}                                     # inventory box -> slot order (target lock)
+    places: dict = {}                                    # inventory box -> (x, y, width) in the frame (target lock)
+    lock_on = not args.no_lock and cfg.get("selection", {}).get("lock_target", True)
+
+    def new_lock(tg):
+        """Target lock for a request whose box is in the inventory (src/box_lock.py); None = read every box."""
+        return TargetLock(n_shelf=args.expected or 0) if lock_on and tg and not photo_mode else None
 
     def inv_targets(r):
-        """Kotak inventaris (terverifikasi perawat) untuk permintaan r -> (ciri tampilan, baris info layar)."""
+        """Kotak inventaris (terverifikasi perawat) untuk permintaan r -> (ciri tampilan, baris info layar); the slot
+        order of every inventory box goes to `slots` (target lock, src/box_lock.py)."""
         global EXPIRY_ALLOWED
         EXPIRY_ALLOWED = None
         # request for one dated box: MATCH only once that printed date is read (src/box_verifier.REQUIRED_EXPIRY)
         box_verifier.REQUIRED_EXPIRY = getattr(r, "expiry", None)
         if inv is None or r is None:
             return [], ""
+        slots.clear()
+        slots.update(as_slot_map(inv.boxes.values()))
+        places.clear()
+        places.update(as_place_map(inv.boxes.values()))
         inv.reload()
         cands = inv.candidates(r)
         EXPIRY_ALLOWED = {b.expiry_date() for b in cands if b.expiry_date()} or None
@@ -841,6 +1106,8 @@ def main():
     screens.mkdir(parents=True, exist_ok=True)
     log_path = resolve(cfg["output"]["log_csv"])
     verify_log = resolve(cfg["output"].get("verify_log_csv", "results/verify_log.csv"))
+    grasp_log = verify_log.parent / "grasp.jsonl"     # one JSON line per PICK for the arm team (src/box_grasp.py)
+    view = args.view                                   # "target" = only the target box is drawn; key v switches
 
     print(f"model   : {weights.name} ({cfg['model']['task']}, imgsz {cfg['model']['imgsz']}, "
           f"device {cfg['model']['device']}), ready in {time.perf_counter() - t_load:.0f} s")
@@ -861,21 +1128,46 @@ def main():
     new_requests: queue.Queue = queue.Queue()
     if session is not None and sys.stdin is not None and sys.stdin.isatty():
         def read_stdin():
+            # a NUMBER from the box list (scripts/demo_daftar_kotak.py) is turned into its request text; ? = list
+            box_list = None
+            if args.inventaris and pathlib.Path(args.inventaris).exists():
+                sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+                from demo_daftar_kotak import groups, show
+                box_list = groups(pathlib.Path(args.inventaris))
             for line in sys.stdin:
-                if line.strip():
-                    new_requests.put(line.strip())
+                s = line.strip()
+                if not s:
+                    continue
+                if box_list is not None and s in ("?", "list", "daftar"):
+                    show(box_list)
+                    continue
+                if box_list is not None and s.lstrip("+").isdigit():
+                    plus, n = ("+" if s.startswith("+") else ""), str(int(s.lstrip("+")))
+                    hit = [g for g in box_list if g["no"] == n]
+                    if not hit:
+                        print(f"[request] no number {n} in the list (? = show the list)")
+                        continue
+                    print(f"[request] #{n} -> {hit[0]['text']}")
+                    s = plus + hit[0]["text"]
+                new_requests.put(s)
         threading.Thread(target=read_stdin, daemon=True).start()
         print("new request: type it in this terminal and press Enter at any time, e.g. pilih terumo accuforce diameter "
               "2.75 panjang 20 | several items: angiolite 2.5 29; accuforce 2.75 20 jumlah 2 | prefix + = "
-              "add to the queue | lewati = next item")
+              "add to the queue | lewati = next item | a NUMBER from the box list (? = list)")
     targets, inv_line = inv_targets(req)
+    lock = new_lock(targets)
+    if lock is not None and session is not None:
+        session.start_searching()                      # the locked box is read at once; counting goes on meanwhile
+        print("lock    : target lock ON - only the box that looks like the requested one is read (--no-lock = all)")
     t_req, found_times = None, []           # waktu permintaan dimulai; (permintaan, detik sampai AMBIL pertama)
+    lock_times = []                         # (permintaan, detik sampai kotak pertama dikunci)
+    panel_state = {"img": None, "until": 0.0, "req": "", "reader": None}   # crops panel shown after a PICK
     tidak_ada_since = None
 
     def switch(item, now, why):
         """Barang berikutnya / permintaan baru. Bacaan rak TIDAK dibuang: bukti tiap kotak diputuskan ulang untuk
         permintaan baru (TrackState.redecide); dulu semua nomor kotak dilupakan dan rak dibaca dari nol lagi."""
-        nonlocal req, session, targets, inv_line, t_req, tidak_ada_since
+        nonlocal req, session, targets, inv_line, t_req, tidak_ada_since, lock
         req = item.req
         if worker is not None:
             worker.req = req
@@ -884,6 +1176,9 @@ def main():
         session.events.append((now, why, None, str(item) + f" | readings of {kept} boxes reused", None))
         print(f"[{why.lower()}] {orders.describe()} (readings of {kept} boxes reused)")
         targets, inv_line = inv_targets(req)
+        lock = new_lock(targets)
+        if lock is not None:
+            session.start_searching()
         t_req, tidak_ada_since = now, None
     shown = collections.deque(maxlen=60)   # waktu frame yang benar-benar ditampilkan (fps nyata di HUD)
     t_first = None                      # waktu frame pertama: peristiwa dicetak dalam detik sejak mulai
@@ -988,25 +1283,34 @@ def main():
             frame, det, reader, tracker, req, cfg, frame_idx, ocr_all=is_photo, stats=stats, worker=worker,
             catalog=catalog, motion_est=None if is_photo else motion_est, need=1 if is_photo else need,
             dt=dt, session=session, now=now, targets=targets, roi=roi,
-            det_big=det_big, cascade_cfg=cfg["model"].get("cascade"))
+            det_big=det_big, cascade_cfg=cfg["model"].get("cascade"), lock=lock, slots=slots, places=places)
+        if lock is not None and lock.log:
+            for t_l, text in lock.log:
+                print(f"[lock] {t_l - t_req:5.1f} s after the request: {text}")
+                if lock.first == t_l and "locked" in text:
+                    lock_times.append((str(req), t_l - t_req))
+            lock.log.clear()
         sharp = None if is_photo or frame_idx % 5 else sharpness(frame)
         if sharp is not None:
             stats["sharp"].append(sharp)
             last_sharp = sharp
-        vis, last_counts, pick = draw(frame, groups, orphans, ids, tracker, req, 1 if is_photo else need,
-                                      {"fps": fps, "det_ms": det_ms, "ocr_ms": ocr_ms,
-                                       "sharp": None if is_photo else last_sharp,
-                                       "moving": stats["blur"] > cfg["ocr"].get("max_motion_px", 6),
-                                       "roi_cut": stats.get("roi_cut", 0),
-                                       "ui": max(1.0, frame.shape[1] / view_width) if view_width else 1.0,
-                                       "inv": " | ".join(x for x in (
-                                           stress.status(now) if stress is not None else "",
-                                           f"{inv_line} | {now - t_req:.1f} s since request" if inv_line else "")
-                                           if x),
-                                       **rates(shown, info)}, session)
+        hud = {"fps": fps, "det_ms": det_ms, "ocr_ms": ocr_ms,
+               "sharp": None if is_photo else last_sharp,
+               "moving": stats["blur"] > cfg["ocr"].get("max_motion_px", 6),
+               "roi_cut": stats.get("roi_cut", 0),
+               "ui": max(1.0, frame.shape[1] / view_width) if view_width else 1.0,
+               "inv": " | ".join(x for x in (
+                   stress.status(now) if stress is not None else "",
+                   f"{inv_line} | {now - t_req:.1f} s since request" if inv_line else "")
+                   if x),
+               **rates(shown, info)}
+        vis, last_counts, pick = draw(frame, groups, orphans, ids, tracker, req, 1 if is_photo else need, hud,
+                                      session, view, lock)
         if roi is not None:
             H, W = frame.shape[:2]
             cv2.rectangle(vis, (int(roi[0] * W), int(roi[1] * H)), (int(roi[2] * W), int(roi[3] * H)), (160, 160, 160), 1)
+        if panel_state["img"] is not None and now < panel_state["until"] and panel_state["req"] == str(req):
+            overlay(vis, panel_state["img"])               # crops of the PICK box: spine, barcode, size label, output
         if args.record_vis and not is_photo:
             # annotated video (boxes, labels, status) exactly as shown on screen: evidence for reports
             if vis_out["w"] is None:
@@ -1023,6 +1327,15 @@ def main():
             log_transitions(verify_log, req, ids, tracker, 1 if is_photo else need,
                             None if session is not None else pick, events)
             for _, what, tid, _, est in events:
+                if what == "PICK":
+                    if panel_state["reader"] is None:
+                        panel_state["reader"] = new_reader()       # turns the size label crop readable
+                    pnl, extra = pick_output(screens / "pick", req, tid, ids, groups, frame, tracker.state(tid),
+                                             lock.box_id if lock is not None and lock.tid == tid else "",
+                                             panel_state["reader"])
+                    write_grasp(grasp_log, req, tid, ids, groups, frame, info.get("live"), extra)
+                    if pnl is not None:
+                        panel_state.update(img=pnl, until=now + PANEL_S, req=str(req))
                 if what == "PICK" and (not found_times or found_times[-1][0] != (str(req), t_req)):
                     found_times.append(((str(req), t_req), now - t_req))
                     print(f"[time] {req}: box #{tid} found and verified {now - t_req:.1f} s after the request")
@@ -1072,6 +1385,11 @@ def main():
         if is_photo:
             out = screens / f"{pathlib.Path(name).stem}_result.png"
             cv2.imwrite(str(out), vis)
+            if pick is not None and req is not None:
+                if panel_state["reader"] is None:
+                    panel_state["reader"] = new_reader()
+                pick_output(screens / "pick", req, pick, ids, groups, frame, tracker.state(pick), "",
+                            panel_state["reader"])
             print(f"{name}: boxes {len(groups)}, size_labels {sum(len(g.labels) for g in groups)}, "
                   f"detect {det_ms:.0f} ms"
                   + (f", MATCH {last_counts[MATCH]}, KANDIDAT {last_counts[CANDIDATE]}, CONFIRM {last_counts[CONFIRM]}"
@@ -1092,8 +1410,17 @@ def main():
         if view_width and vis.shape[1] > view_width:         # tampilan kecil (Remmina/RDP), simpanan tetap penuh
             s = view_width / vis.shape[1]
             show = cv2.resize(vis, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
-        cv2.imshow("Box pipeline (q quit, a shelf area, s save, b scan details, r request again, o read again)", show)
+        cv2.imshow(WINDOW, show)
         key = cv2.waitKey(0 if is_photo else 1) & 0xFF
+        while is_photo and key == ord("v"):                 # photo: draw the same result again in the other view
+            view = "all" if view == "target" else "target"
+            show, _, _ = draw(frame, groups, orphans, ids, tracker, req, 1, hud, session, view)
+            if view_width and show.shape[1] > view_width:
+                s = view_width / show.shape[1]
+                show = cv2.resize(show, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+            print(f"[view] {'only the target box' if view == 'target' else 'all boxes (diagnosis)'}")
+            cv2.imshow(WINDOW, show)
+            key = cv2.waitKey(0) & 0xFF
         if key in (ord("q"), 27) or done:
             break
         if key == ord("b") and not scan["busy"] and not is_photo:
@@ -1117,6 +1444,9 @@ def main():
             cv2.imwrite(str(screens / f"{stamp}_raw.png"), frame)
             cv2.imwrite(str(screens / f"{stamp}_vis.png"), vis)
             print(f"[saved] {screens / (stamp + '_vis.png')}")
+        if key == ord("v"):
+            view = "all" if view == "target" else "target"
+            print(f"[view] {'only the target box' if view == 'target' else 'all boxes (diagnosis)'}")
         if key == ord("o") and req is not None:
             for tid in ids:
                 if tid >= 0:
@@ -1190,6 +1520,8 @@ def main():
         print(f"  recording          : {recorder.n} frames ({recorder.real_fps:.1f} fps real"
               + (f", {recorder.dropped} dropped because writing could not keep up" if recorder.dropped else "")
               + f") -> {recorder.path}\n                       frame timing -> {VideoRecorder.times_path(recorder.path).name}")
+    for r, secs in lock_times:
+        print(f"  time to LOCK       : {secs:5.1f} s  ({r}: one box chosen, only that box is read)")
     for (r, _), secs in found_times:
         print(f"  time to PICK       : {secs:5.1f} s  ({r})")
     if session is not None and orders is not None:

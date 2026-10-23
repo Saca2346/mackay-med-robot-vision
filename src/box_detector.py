@@ -33,13 +33,21 @@ class BoxGroup:
 
 class BoxDetector:
     def __init__(self, weights: str, task: str = "obb", imgsz: int = 640, device: str = "cpu",
-                 conf: dict | None = None, iou: float = 0.5, class_alias: dict | None = None):
+                 conf: dict | None = None, iou: float = 0.5, class_alias: dict | None = None,
+                 fixed_input: bool = False):
         from ultralytics import YOLO
 
         # imgsz boleh [tinggi, lebar] untuk model ekspor ukuran tetap (mis. OpenVINO 736x1280 untuk webcam 16:9).
         # Model .pt tidak punya ukuran tetap dan tidak bisa memakai device "intel:..." (itu khusus OpenVINO).
+        # fixed_input (config model.fixed_input): a .pt model keeps [h, w] and gets the full letterbox of that size,
+        # exactly like the fixed-size OpenVINO export (used to compare .pt models on a server GPU with the laptop:
+        # 17-10, v4 found 20 boxes as OpenVINO 544x960, 20 as .pt fixed 544x960, 19 as .pt 544x960 with minimal
+        # padding, 17 as .pt 960 square). Off by default: a square imgsz is what photos (portrait) need.
+        self.rect = True
         if str(weights).endswith(".pt"):
-            if isinstance(imgsz, (list, tuple)):
+            if isinstance(imgsz, (list, tuple)) and fixed_input:
+                self.rect = False
+            elif isinstance(imgsz, (list, tuple)):
                 imgsz = max(imgsz)
             if str(device).startswith("intel"):
                 print(f"[detector] {device} hanya untuk model OpenVINO -> model .pt dijalankan di cpu")
@@ -54,7 +62,8 @@ class BoxDetector:
         self.alias = {str(v).lower(): k for k, v in alias.items()}
         # pemanasan: panggilan pertama selalu lambat (memuat / mengompilasi model), jangan ikut dihitung di FPS
         h, w = imgsz if isinstance(imgsz, (list, tuple)) else (imgsz, imgsz)
-        self.model.predict(np.zeros((h, w, 3), dtype=np.uint8), imgsz=imgsz, device=device, verbose=False)
+        self.model.predict(np.zeros((h, w, 3), dtype=np.uint8), imgsz=imgsz, device=device, rect=self.rect,
+                           verbose=False)
 
     def _std_name(self, name: str) -> str | None:
         return self.alias.get(str(name).lower())
@@ -63,7 +72,7 @@ class BoxDetector:
         """Satu frame -> daftar deteksi + waktu inferensi (ms)."""
         t0 = time.perf_counter()
         r = self.model.predict(frame, imgsz=self.imgsz, conf=min(self.conf.values()), iou=self.iou,
-                               device=self.device, verbose=False)[0]
+                               device=self.device, rect=self.rect, verbose=False)[0]
         ms = (time.perf_counter() - t0) * 1000.0
         names = r.names
         dets: list[Det] = []

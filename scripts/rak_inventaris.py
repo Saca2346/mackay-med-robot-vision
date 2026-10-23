@@ -47,7 +47,7 @@ from src.box_catalog import Catalog  # noqa: E402
 from src.box_detector import BoxDetector, group_labels  # noqa: E402
 from src.box_evidence import box_width_px, prepare_crops, read_any  # noqa: E402
 from src.box_geometry import draw_poly, put_label, to_poly  # noqa: E402
-from src.box_inventory import (STATUS_CEK, STATUS_DAFTAR, STATUS_DIAMBIL, STATUS_DRAF, STATUS_OK, InvBox,  # noqa: E402
+from src.box_inventory import (ACTIVE, STATUS_CEK, STATUS_DAFTAR, STATUS_DIAMBIL, STATUS_DRAF, STATUS_OK, InvBox,  # noqa: E402
                                Inventory, codes_for, identify, import_list, place_scanned, sig_str, signature,
                                similarity, spine_crop)
 from src.box_motion import MotionEstimator  # noqa: E402
@@ -111,7 +111,8 @@ def pindai(args):
     cfg = load_config(resolve(args.config))
     inv_path = resolve(args.inventaris)
     inv = Inventory(inv_path)
-    if not args.lanjut:
+    peta = getattr(args, "cmd", "") == "peta"
+    if not args.lanjut and not peta:
         _start_fresh(inv)
     catalog = Catalog(resolve(cfg.get("verify", {}).get("catalog_csv", "data/gtin_catalog.csv")))
     weights = resolve(args.weights or cfg["model"]["weights"])
@@ -175,6 +176,10 @@ def pindai(args):
             if st.epoch != r["epoch"]:
                 r["epoch"], r["evs"], r["id"] = st.epoch, collections.deque(maxlen=8), (None, "", "dibaca ulang")
             r["frames"] += 1
+            q = to_poly(polys[i])
+            r["x"] = float(q.mean(axis=0)[0])                     # last position (peta: slot left -> right)
+            r["place"] = (float(q.mean(axis=0)[0]) / w, float(q.mean(axis=0)[1]) / h,
+                          box_width_px(polys[i]) / w)             # peta: where the box stands in the frame
             if still and frame_idx % 3 == 0 and box_width_px(polys[i]) >= 24:
                 crop = spine_crop(frame, polys[i])
                 sharp = float(cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
@@ -233,7 +238,67 @@ def pindai(args):
                     r["reads"] += 1
                     r["id"] = identify(list(r["evs"]), catalog)
         time.sleep(0.05)
-    _save_scan(inv, recs, catalog, resets, last_vis)
+    if peta:
+        _save_map(inv, recs, catalog, resets, last_vis)
+    else:
+        _save_scan(inv, recs, catalog, resets, last_vis)
+
+
+def _save_map(inv: Inventory, recs, catalog, resets, last_vis) -> None:
+    """peta: the shelf map for the target lock (src/box_lock.py). VERIFIED boxes keep their identity, data and check
+    status; only their slot (left -> right on the shelf now) and their look from THIS camera are updated. A box is
+    matched to an inventory row only by an identity with >= 2 independent sources (and its date / LOT when the row
+    has twins). Nothing is added, verified or removed: unknown boxes are only listed (pindai + cek for them)."""
+    if resets:
+        print(f"\npeta NOT saved: the camera position was lost {resets}x, so the slot order is not reliable. "
+              "Hold the camera still (tripod / robot pose) and run peta again.")
+        return
+    real = sorted(((tid, r) for tid, r in recs.items() if r["frames"] >= MIN_FRAMES and "x" in r),
+                  key=lambda x: x[1]["x"])
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = inv.path.with_name(f"{inv.path.stem}_{stamp}.csv")
+    shutil.copy2(inv.path, backup)
+    used, mapped, unknown, twins = set(), [], [], []
+    for slot, (tid, r) in enumerate(real, 1):
+        key = r["id"][0]
+        if key is None:
+            unknown.append(slot)
+            continue
+        gtin, lot, exp = codes_for(list(r["evs"]), key, catalog)
+        rows = [b for b in inv.boxes.values() if b.status in ACTIVE and b.key() == key and b.box_id not in used]
+        for field, val in (("expiry", exp), ("lot", lot)):
+            if val and len(rows) > 1:
+                rows = [b for b in rows if getattr(b, field) == val] or rows
+        if len(rows) != 1:
+            (twins if rows else unknown).append(slot)
+            continue
+        b = rows[0]
+        used.add(b.box_id)
+        sig = signature(r["crop"]) if r["crop"] is not None else None
+        b.order = slot
+        if r.get("place"):
+            b.pos = " ".join(f"{v:.4f}" for v in r["place"])
+        if sig is not None:
+            b.sig = sig_str(sig)
+        b.note = "; ".join([x for x in b.note.split("; ") if x and not x.startswith("peta ")]
+                           + [f"peta {stamp[:8]} slot {slot}"])
+        mapped.append(b)
+    lost = [b for b in inv.boxes.values() if b.status in ACTIVE and b.box_id not in used]
+    for b in lost:
+        b.order, b.pos = 0, ""                     # old slot is not trusted any more: the lock falls back to look
+    inv.save()
+    if last_vis is not None:
+        cv2.imwrite(str(inv.dir / "peta_terakhir.jpg"), last_vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    print(f"\nPeta rak: {len(real)} boxes on the shelf (left -> right) -> {inv.path} (backup {backup.name})")
+    print(f"  slot + look updated (verified boxes): {len(mapped)}  "
+          + ", ".join(f"{b.box_id}@{b.order}" for b in sorted(mapped, key=lambda b: b.order)))
+    if twins:
+        print(f"  twin boxes, date / LOT not read -> not mapped: slots {twins}")
+    if unknown:
+        print(f"  identity not certain (fewer than 2 sources) -> not mapped: slots {unknown}")
+    if lost:
+        print(f"  verified boxes not mapped now (slot cleared): {', '.join(b.box_id for b in lost)}")
+    print("Identity, data and check status were NOT changed. Unknown / new boxes: pindai + cek.")
 
 
 def _merge_segments(real):
@@ -584,6 +649,13 @@ def main():
     p.add_argument("--no-window", action="store_true")
     p.add_argument("--max-frames", type=int, default=0)
     p.add_argument("--weights", default=None)
+    m = sub.add_parser("peta", help="shelf map for the target lock: slot + look of the VERIFIED boxes from this "
+                                    "camera (identity and check status unchanged)")
+    m.add_argument("--source", default=None, help="video / foto pengganti webcam")
+    m.add_argument("--camera", default=None)
+    m.add_argument("--no-window", action="store_true")
+    m.add_argument("--max-frames", type=int, default=0)
+    m.add_argument("--weights", default=None)
     c = sub.add_parser("cek", help="perawat memeriksa / mengoreksi tiap kotak")
     c.add_argument("--by", default=None, help="nama pemeriksa (kalau kosong, ditanyakan)")
     c.add_argument("--semua", action="store_true", help="periksa ulang juga kotak yang sudah terverifikasi")
@@ -598,7 +670,9 @@ def main():
         sp.add_argument("--inventaris", default=DEFAULT_INV)
         sp.add_argument("--config", default="config/box_pipeline_config.yaml")
     args = ap.parse_args()
-    {"pindai": pindai, "cek": cek, "impor": impor, "lihat": lihat, "kembali": kembali}[args.cmd](args)
+    if args.cmd == "peta":
+        args.lanjut = False
+    {"pindai": pindai, "peta": pindai, "cek": cek, "impor": impor, "lihat": lihat, "kembali": kembali}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -150,6 +150,8 @@ class LatestFrame:
         self.gap = 1               # jumlah frame kamera sejak frame yang diambil sebelumnya (1 = tidak ada yang dilewati)
         self.t = 0.0               # waktu frame terakhir yang diambil lewat get()
         self._frame, self._frame_t, self._seq, self._taken, self._stop = None, 0.0, 0, 0, False
+        self._frame_depth, self._frame_intrinsics = None, None
+        self._taken_frame, self._taken_depth, self._taken_intrinsics = None, None, None
         self._cond = threading.Condition()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -159,6 +161,10 @@ class LatestFrame:
             while not self._stop:
                 ok, frame = self.source.read()
                 t = time.monotonic()
+                # Capture the pair before the next camera read can evict it or reconnect with new intrinsics.
+                depth = self.source.depth_for(frame) if ok and hasattr(self.source, "depth_for") else None
+                intrinsics = getattr(self.source, "intrinsics", None) if ok else None
+                intrinsics = dict(intrinsics) if intrinsics is not None else None
                 if ok and self.on_frame is not None:
                     self.on_frame(frame, t)
                 with self._cond:
@@ -167,6 +173,7 @@ class LatestFrame:
                     if self._seq != self._taken:
                         self.skipped += 1
                     self._frame, self._frame_t, self._seq = frame, t, self._seq + 1
+                    self._frame_depth, self._frame_intrinsics = depth, intrinsics
                     self.captured += 1
                     self._cond.notify_all()
         finally:
@@ -184,7 +191,21 @@ class LatestFrame:
             self.gap = max(self._seq - self._taken, 1)
             self._taken = self._seq
             self.t = self._frame_t
+            # Keep the delivered frame's pair alive while detection and PICK crop OCR process that frame.
+            self._taken_frame = self._frame
+            self._taken_depth, self._taken_intrinsics = self._frame_depth, self._frame_intrinsics
             return self._frame
+
+    def depth_for(self, frame):
+        """Depth pinned to the frame returned by get(); never substitute a newer frame's depth."""
+        with self._cond:
+            return self._taken_depth if frame is not None and frame is self._taken_frame else None
+
+    def intrinsics_for(self, frame):
+        """Colour intrinsics captured with the delivered frame, including across camera reconnects."""
+        with self._cond:
+            intr = self._taken_intrinsics if frame is not None and frame is self._taken_frame else None
+            return dict(intr) if intr is not None else None
 
     def stop(self) -> None:
         self._stop = True

@@ -1,5 +1,7 @@
 # Sisa pekerjaan setelah 14 Okt 2026: langkah demi langkah
 
+> Status update, 14 October 2026 (Codex): the supplied CVAT ZIP was checked; all 33 close-ups are converted on the server. Remaining date review is complete: **196/196 photos selesai, 0 auto**, 1,489 expiry labels. Geometry/readiness passed with 196 seeds and folds 66/65/65. Training completed in 70 minutes. The v6 accuracy comparison failed; safety evaluation passed with 0 wrong MATCH (1,276 wrong-identity requests). Keep the current demo model. No further master-label edits were made after the owner confirmed concurrent review by Claude. See `../CVAT_EXPIRY_REVIEW_20261014.md` for evidence. Task 3 still requires a physical visit. The procedures below are retained for future batches.
+
 Versi Inggris: `docs/REMAINING_WORK.md`. Kerjakan berurutan dari atas; centang kotak di bagian akhir.
 
 | # | Tugas | Di mana | Waktu | Selesai bila |
@@ -184,7 +186,7 @@ Benar bila **`SEMUA SYARAT TERPENUHI (CEK=1: tidak training)`**. Bila berhenti:
 ### 2.6 Training (otomatis, 1-1,5 jam)
 ```bash
 bash tools/mulai_training_3kelas.sh
-tail -3 logs/train_3kelas.log          # cek kapan saja; selesai bila ada baris "model final"
+tail -3 logs/train_3kelas.log          # cek kapan saja; complete only after final training finishes: check logs/best_model.json and runs/best_final/done
 ```
 Skrip mencadangkan hasil lama dulu ke `~/Downloads/cadangan_sebelum_3kelas_<waktu>`. Terminal boleh ditutup.
 
@@ -270,13 +272,13 @@ Beri tahu Claude nama folder `results\sesi_<tanggal_waktu>\`; Claude membaca `LA
 ## Daftar centang
 
 - [x] 0 `RUN_ON_SERVER.bat langkah9_tools_review` -> `done` (14 Okt 06:43, dicek Claude: tool terpasang, antrean 51/163)
-- [ ] 1.1-1.4 task CVAT `baru_20260928_16h` dengan draf
-- [ ] 1.5 33 foto dikoreksi
-- [ ] 1.6-1.7 impor + `reviewed_to_spec.py` -> `33 converted, 0 to check`
-- [ ] 2 review tanggal: sesi 1 [ ] 2 [ ] 3 [ ] 4 [ ] 5 [ ] 6 [ ]  (112 foto lama selesai [ ], 33 foto baru [ ])
-- [ ] 2.5 `CEK=1` -> SEMUA SYARAT TERPENUHI
-- [ ] 2.6 training selesai ("model final")
-- [ ] 2.7 hasil dikirim ke Claude
+- [x] 1.1-1.4 task CVAT `baru_20260928_16h` dengan draf
+- [x] 1.5 33 foto dikoreksi
+- [x] 1.6-1.7 impor + `reviewed_to_spec.py` -> `33 converted, 0 to check`
+- [x] 2 date review complete on the server: 196/196 photos, including all 33 close-ups
+- [x] 2.5 `CEK=1` -> SEMUA SYARAT TERPENUHI
+- [x] 2.6 training complete: final weights, done marker, and completion message verified (70 minutes)
+- [x] 2.7 comparison and safety report prepared: accuracy gate FAIL, 0 wrong MATCH; see audit report (available for handoff to Claude)
 - [ ] 3.2 sesi S terekam
 - [ ] 3.3 uji Sled Bag: nomor 2 [ ] 16 [ ] 0 [ ]
 - [ ] 3.4 sesi data `s1_far` [ ] `s2_mid` [ ], frame diambil

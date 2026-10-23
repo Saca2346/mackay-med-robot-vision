@@ -46,7 +46,7 @@ def main() -> None:
         md += ["## Stress test (every box in turn)", "",
                f"{len(ok)} of {len(rows)} requests reached PICK/TAKEN. Results: "
                + ", ".join(f"{k} {sum(1 for r in rows if r.get('hasil') == k)}"
-                           for k in ("TAKEN", "PICK", "NOT FOUND", "TIMEOUT") if any(r.get("hasil") == k for r in rows)), ""]
+                           for k in ("TAKEN", "PICK", "PICK NOT TAKEN", "NOT FOUND", "TIMEOUT") if any(r.get("hasil") == k for r in rows)), ""]
         md += table([[r.get("no"), r.get("permintaan"), r.get("catatan"), r.get("hasil"), r.get("detik"), r.get("kotak"),
                       r.get("bukti"), r.get("cek_ulang"), r.get("batal")] for r in rows],
                     ["No", "Request", "Box", "Result", "Seconds", "Track", "Evidence", "Rechecks", "Cancelled"])

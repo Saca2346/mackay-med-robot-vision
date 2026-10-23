@@ -1,0 +1,89 @@
+model:
+  # Single-carton candidate evaluated on the owner's 21 October D455 recording.
+  # This is not a general all-shelf RealSense replacement or a 2-second guarantee.
+  weights: models/box_y26_maxB_544x960_openvino_model
+  task: obb
+  imgsz:
+  - 544
+  - 960
+  device: intel:gpu.0
+  iou: 0.5
+  conf:
+    box: 0.35
+    size_label: 0.45
+  cascade:
+    enabled: false
+    weights: models/box_v4s.pt
+    imgsz: 1280
+    device: cpu
+    pad_frac: 0.25
+classes:
+  box: box
+  size_label: size_label
+grouping:
+  min_label_overlap: 0.5
+ocr:
+  engine: rapidocr
+  backend: onnxruntime
+  min_confidence: 0.9
+  retry_flip_below: 0.8
+  min_crop_height: 48
+  every_n_frames: 15
+  every_n_frames_candidate: 5
+  max_crops_per_frame: 2
+  max_motion_px: 6
+  threads: 2
+  max_lost_frames: 10
+matching:
+  history: 5
+  require_consistent: 2
+  diameter_range_mm:
+  - 1.0
+  - 10.0
+  length_range_mm:
+  - 6
+  - 60
+selection:
+  count_s: 1.5
+  empty_s: 2.0
+  gone_s: 2.0
+  recheck_s: 5.0
+  expected_count: 0
+verify:
+  catalog_csv: data/gtin_catalog.csv
+  min_score: 2
+  trust_unverified_catalog: false
+  min_box_width_px: 24
+  ocr_full_box: true
+  full_box_min_width_px: 40
+  spine_bands: true
+catalog:
+- angiolite
+- xperience pro
+- essential pro
+- accuforce
+- ultimaster nagomi
+- ryurei
+- conqueror nc pro
+- nc emerge
+- agent
+- sapphire
+- scoreflex
+- permanent sled bag
+- chroma
+- sequent please neo
+camera:
+  backend: realsense
+  width: 1280
+  height: 800
+  fps: 30
+  serial: ''
+output:
+  screens_dir: results/focus_realsense_single/screens
+  verify_log_csv: results/focus_realsense_single/verify_log.csv
+visual:
+  fast_read: true
+  workers: 2
+  target_seconds: 2
+  defer_pending_seconds: 2
+  warmup_text: true

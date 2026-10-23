@@ -22,6 +22,7 @@ import numpy as np
 class OcrToken:
     text: str
     conf: float        # 0..1
+    poly: np.ndarray | None = None  # coordinates in the actual OCR input, for evidence crops only
 
 
 @dataclass
@@ -110,7 +111,8 @@ class SizeTextReader:
                 return []
             # urutkan baca: atas->bawah, kiri->kanan
             result = sorted(result, key=lambda r: (round(np.mean([p[1] for p in r[0]]) / 20), np.mean([p[0] for p in r[0]])))
-            return [OcrToken(str(r[1]).strip(), float(r[2])) for r in result if str(r[1]).strip()]
+            return [OcrToken(str(r[1]).strip(), float(r[2]), np.asarray(r[0], np.float32))
+                    for r in result if str(r[1]).strip()]
         import pytesseract
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         try:

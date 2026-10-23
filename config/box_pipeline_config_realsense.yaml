@@ -96,6 +96,8 @@ catalog:
   - "sapphire"
   - "scoreflex"
   - "permanent sled bag"
+  - "chroma"                       # Biosensors (task photo 13-10)
+  - "sequent please neo"           # B. Braun DCB (task photo 13-10)
 
 camera:                            # Intel RealSense D455 lewat pyrealsense2, aliran warna saja; harus USB 3.x
   backend: "realsense"

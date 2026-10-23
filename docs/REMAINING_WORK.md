@@ -1,5 +1,23 @@
 # Remaining work after 14 Oct 2026: step by step
 
+20 October: common webcam/RealSense CMD testing is available through
+`TEST_TARGET.bat` and [TARGET_CAMERAS.md](TARGET_CAMERAS.md). Independent-source
+verification is unchanged; the latency indicator reports whether 2 s was met.
+
+Current task, 19 Oct: focused Angiolite two-source verification uses `FOCUS_WEBCAM.bat`;
+see [FOCUSED_WEBCAM.md](FOCUSED_WEBCAM.md). Stress tests are removed from the active
+webcam menus. Green identity + saved number/label crops are implemented, but
+consistent 1-2 s verification and complete barcode/LOT/expiry details remain open.
+The older broad lab checklist below remains historical context.
+
+Update, 17 Oct: tasks 0-2 below are complete (see checklist). For subsequent fixes, the prepared YOLO26 candidate,
+and the current owner/lab checklist, see [Codex follow-up](CODEX_FOLLOWUP_20261017.md). The live model is still v4;
+YOLO26 has not been activated. DEMO now uses current settings and a new isolated output folder on each launch.
+The owner currently uses an external USB webcam: DEMO defaults to the webcam profile. Follow
+`docs/TEST_SESSION_GUIDE.md` for the webcam session; the D455-specific data collection instructions below are deferred.
+For the current single-box visual lock task, use DEMO **1 -> 3** and
+[TARGET_VIEW.md](TARGET_VIEW.md); recorded PICK/TAKEN tests remain a separate workflow.
+
 Indonesian version (the one to work from): `docs/id/PANDUAN_SISA_PEKERJAAN.md`. Work from top to bottom; tick the list at the end.
 
 | # | Task | Where | Time | Done when |
@@ -7,7 +25,7 @@ Indonesian version (the one to work from): `docs/id/PANDUAN_SISA_PEKERJAAN.md`. 
 | 0 | Install the new review tools on the server | laptop, 1 command | 5 min | output `done` |
 | 1 | Correct the boxes of the 33 close-up photos | CVAT on the server, laptop browser | 1.5-2 h | `33 converted, 0 to check` |
 | 2 | Review the date labels of 145 photos, then the 3-class training | server terminal | 5-7 h review (6 sessions) + 1.5 h automatic training | `bandingkan_model.py` output sent to Claude |
-| 3 | Live test and shelf data in front of the shelf | laptop + D455 | 2-3 h per visit | session folder + `LAPORAN_SESI.md` |
+| 3 | Live test; D455-specific training data deferred | laptop + external USB webcam | 2-3 h per visit | session folder + `LAPORAN_SESI.md` |
 
 Task 3 does not depend on tasks 1-2.
 
@@ -77,31 +95,32 @@ learned as "not a date": never `ok` when unsure.
 5. `CEK=1 bash tools/mulai_training_3kelas.sh` -> `SEMUA SYARAT TERPENUHI`. Open PERIKSA boxes on a `selesai` photo:
    `python tools/set_expiry.py NAME --redo` and review again; too few seeds or a fold < 5: review photos of other dates;
    VRAM: try later.
-6. `bash tools/mulai_training_3kelas.sh`, then `tail -3 logs/train_3kelas.log` until "model final" (1-1.5 h; old results are
+6. `bash tools/mulai_training_3kelas.sh`, then `tail -3 logs/train_3kelas.log` until the final completion message, final weights and `runs/best_final/done` (1-1.5 h; old results are
    backed up first).
 7. Send to Claude: `python tools/bandingkan_model.py`, `grep -A6 "Hasil cross-validation" logs/train_3kelas.log`,
    `cat logs/best_model.json`. A new model replaces v6 only if box and size_label mAP50-95 and recall drop by at most 0.02 and
    the safety test (0 wrong MATCH) passes; the demo model v4 stays until then.
 
-## Task 3. In front of the shelf (laptop + D455)
+## Task 3. In front of the shelf (currently laptop + external USB webcam)
 
-1. **Prepare** (10 min): charger, Best performance, VS Code and browser closed; D455 on USB 3 (`TEST_REALSENSE.bat` menu 1
-   shows 3.x), tripod, all 20 boxes, a phone photo of the shelf.
+1. **Prepare** (10 min): charger, Best performance, other camera apps closed; external USB webcam, tripod, all 20 boxes,
+   a phone photo of the shelf. Confirm the external-camera preview and actual resolution with DEMO menu 1 and calibration.
 2. **Recorded session**: `cd C:\Users\sacab\Downloads\mackay_vision\code`, `DEMO.bat`, **S**; pass criteria per step in
    `docs/TEST_SESSION_GUIDE.md`. Expected: iVascular (5, 9, 14) PICK at shelf distance, other brands candidate.
 3. **Sled Bag dates** (fix of 14 Oct), in step 6: type `2` (K03, 2029-03-10: PICK only after its date is read), `16`
    (K17, 2029-03-12, one digit from K03: PICK K17, never K03), `0` (any Sled Bag: earliest date first). Bring the camera close
    until the date next to the hourglass is clearly readable on the live view, hold 3-5 s. Note per number: right box PICK /
    candidate / WRONG box PICK. **A wrong-box PICK: stop and report at once.**
-4. **Shelf data**: `TEST_REALSENSE.bat` -> **D**, sessions `s1_far` (whole shelf) and `s2_mid` (box width >= 40 px, left half
+4. **D455 shelf data (deferred while using webcam)**: `TEST_REALSENSE.bat` -> **D**, sessions `s1_far` (whole shelf) and `s2_mid` (box width >= 40 px, left half
    then right half); calibrate until no FAIL, record 1-2 min (still 3 s per position), `q` stops. Then
    `venv\Scripts\python.exe scripts\ambil_frame_data.py results\data_rak\s1_far.mp4 results\data_rak\s2_mid.mp4`
    (frames in `labeling\raw_d455\`) and tell Claude, who prepares drafts and a CVAT batch as in task 1.
-5. **Afterwards**: give Claude the `results\sesi_<date_time>\` folder name for the summary.
+5. **Afterwards**: keep the printed `results\demo_<launch_time>\sesi_<date_time>\` folder name for the summary.
 
 ## Checklist
 
 - [x] 0 `langkah9_tools_review` -> `done` (14 Oct 06:43, checked: tools installed, queue 51/163)
-- [ ] 1 CVAT task, 33 photos corrected, import + `reviewed_to_spec.py` -> `33 converted, 0 to check`
-- [ ] 2 date review: session 1 [ ] 2 [ ] 3 [ ] 4 [ ] 5 [ ] 6 [ ]; `CEK=1` passes [ ]; training done [ ]; results sent [ ]
+- [x] 1 CVAT export checked; all 33 close-ups imported and converted on the server
+- [x] 2 date review: all 196 photos completed; `CEK=1` passed with 196 seeds
+- [x] 2 training finished; comparison FAIL, out-of-fold safety evaluation PASS (0 wrong MATCH); report prepared
 - [ ] 3 session S [ ]; Sled Bag 2 [ ] 16 [ ] 0 [ ]; shelf data `s1_far` [ ] `s2_mid` [ ], frames extracted [ ]

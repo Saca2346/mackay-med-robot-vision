@@ -39,7 +39,7 @@ def test_reading_log_keeps_raw_ocr_text_for_misread_analysis():
     finally:
         m.READ_LOG = None
     row = log.getvalue().strip()
-    assert row.endswith('"Angiolite 5 mm || SCCDSR14150400010 || REF SCCDSR14150400010 \'LOT\'"')
+    assert row.endswith('"Angiolite 5 mm || SCCDSR14150400010 || REF SCCDSR14150400010 \'LOT\'",100,1')   # + ocr_ms,ocr_calls
     assert "angiolite:4x10" in row
 
 
