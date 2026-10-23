@@ -4,6 +4,12 @@ Newest entry first. One entry per finished piece of work: date, who, what change
 
 ## 2026-10-23 - Owner decision: barcode stays OFF for the Sled Bags (recorded by Claude Code)
 
+* OWNER DECISION 24 Oct (supersedes the "Sled Bags end at TEXT READ" consequence of the barcode-OFF decision): Permanent Sled Bag requests WITH a date may go green on name + the printed date equal to the
+  requested date (two sources: `W_DATE`, atom `pd`, `printed_date_agrees` in `src/box_verifier.py`; AGENTS.md rule 1 notes the exception). Unchanged: the strict date gate (`REQUIRED_EXPIRY`, `_date_gate`),
+  a request without a date (one source), a wrong date, every sized product. 4 new tests, 632 pass. Replay (`results/weekly_20261023/confusion_sled`, 33 requests per camera): webcam 11 of 11 present
+  green (4 Sled Bags "text + printed date" 1.38 / 1.78 / 1.78 / 2.99 s, 7 sized as before), 0 false green of 22 absent (4 Sled Bags with another date: one source); D455 8 of 11 green (4 Sled Bags 9.7 / 6.7 / 1.6 / 2.1 s,
+  4 sized; 3 Accuforce one source), 0 false green. RISK to watch: a misread digit can make the date of ANOTHER box equal the requested one (03-10 / 03-12); the date gate needs consistent reads, and the
+  negatives with 03-11 / 03-25 / 04-01 / 2030-01-01 stayed one source in both cameras, but only 4 such cases were tested. Live check of the Sled Bags still to do. Slides 4 and 7 of the weekly deck still say "Sled Bags TEXT READ".
 * Owner review of the replay batch `logo_ab/pos_on_3/webcam/positives` (owner_review_positives.csv, 24 Oct): all 11 ACCEPT (correct box, outline, sources OK; date OK only for the 4 Sled Bags, N/A otherwise).
   Notes turned into display-only panel fixes (no matching/PICK rule touched): (1) "mm" under the size numerals was cut: `numeral_crop` widens the crop downwards; (2) K06 showed date fragments, K15 a duplicate
   numeral: `pick_number_tiles` shows one crop for the verified diameter and one for the length; (3) Sled Bags: the slot shows the printed date that was read, turned upright (`upright_date`: both turns read with

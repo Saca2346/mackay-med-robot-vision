@@ -456,6 +456,15 @@ def decide(ident: Identity, req: Request) -> tuple[str, str]:
 
 # ------------------------------------------------------------------ verifikasi banyak sumber
 W_BARCODE, W_GTIN_TEXT, W_TEXT, W_REF = 2, 1, 1, 1
+# Owner decision 24-10 (Permanent Sled Bag, barcode OFF): for a request of a box WITHOUT a size AND with a date, the printed date
+# that equals the requested date counts as a second source next to the product name. Nothing else changes: the date still has
+# to pass the strict date gate (REQUIRED_EXPIRY / TrackState._date_gate) before MATCH, and a request without a date stays one source.
+W_DATE = 1
+
+
+def printed_date_agrees(ev, req) -> bool:
+    """A printed date read on this box equals the date of the request of a box without a size (the Sled Bag exception)."""
+    return req.product in NO_SIZE and req.expiry is not None and req.expiry in (getattr(ev, "dates", ()) or ())
 
 
 @dataclass
@@ -525,6 +534,8 @@ def decide_multi(ev: Evidence, req: Request, catalog=None, today: dt.date | None
             contra.append(("text", W_TEXT, ", ".join(bad)))
         elif t.product_ok and (req.diameter is None or (d_ok and t.length_ok)):
             agree.append(("text", W_TEXT, t.text[:40]))
+            if t.product_ok and printed_date_agrees(ev, req):
+                agree.append(("printed date", W_DATE, req.expiry.isoformat()))
         elif t.product_ok or t.diameter_ok or t.length_ok:
             partial = True
     for r in ev.refs:
@@ -584,6 +595,8 @@ def support(ev: Evidence, req: Request, catalog=None, today: dt.date | None = No
                 atoms.add("tp")
                 if req.diameter is None:                  # produk tanpa ukuran (mis. Sled Bag): nama saja = teks lengkap
                     atoms.update(("td", "tl"))
+                    if printed_date_agrees(ev, req):
+                        atoms.add("pd")                      # owner decision 24-10: the requested printed date = second source
         if req.diameter is not None:
             for val, ok, atom, want in ((t.diameter, t.diameter_ok, "td", req.diameter),
                                         (t.length, t.length_ok, "tl", req.length)):
@@ -609,7 +622,8 @@ def combined_score(atoms) -> tuple[int, set]:
     gtins = {a[1] for a in atoms if isinstance(a, tuple)}
     score = (W_BARCODE if any(isinstance(a, tuple) and a[0] == "bc" for a in atoms) else 0) \
         + (W_GTIN_TEXT if any(isinstance(a, tuple) and a[0] == "gt" for a in atoms) else 0) \
-        + (W_REF if "ref" in atoms else 0) + (W_TEXT if {"tp", "td", "tl"} <= atoms else 0)
+        + (W_REF if "ref" in atoms else 0) + (W_TEXT if {"tp", "td", "tl"} <= atoms else 0) \
+        + (W_DATE if {"tp", "pd"} <= atoms else 0)
     return score, gtins
 
 
@@ -707,7 +721,8 @@ class TrackState:
         atoms = frozenset().union(*[a for a, _ in rows]) if rows else frozenset()
         names = [n for n, ok in (("barcode", any(isinstance(a, tuple) and a[0] == "bc" for a in atoms)),
                                  ("GTIN text", any(isinstance(a, tuple) and a[0] == "gt" for a in atoms)),
-                                 ("text", {"tp", "td", "tl"} <= atoms), ("REF", "ref" in atoms)) if ok]
+                                 ("text", {"tp", "td", "tl"} <= atoms), ("REF", "ref" in atoms),
+                                 ("printed date", {"tp", "pd"} <= atoms)) if ok]
         return " + ".join(names)
 
     def stable(self, need: int) -> str:
