@@ -12,7 +12,7 @@ P=~/trse_venv/bin/python
 export PYTHONPATH=../pylib
 W=${1:-}; SZ=${2:-544x960}; TAG=${3:-final_B}
 DET=""; [ -n "$W" ] && DET="--det $W"
-PROCS="--workers 8 --procs 24 --cls-cpu 1 --proc-threads 1 --order skim"
+PROCS="--workers 27 --procs 24 --cls-cpu 1 --proc-threads 1 --order skim"
 SAME="$DET --imgsz $SZ --variants 1 --lazy 1 --snap 1"
 run() { echo "== $*"; $P aipc_main.py "$@" > final_last.log 2>&1; grep -a "^{" final_last.log | cut -c1-900; grep -a "Error" final_last.log | tail -2; }
 run time t1_drive t2_drive t1_orig --runs 5 $SAME $PROCS --tag $TAG

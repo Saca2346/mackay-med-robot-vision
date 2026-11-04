@@ -35,7 +35,16 @@ untouched). Photos, recordings, models and inventory files stay on the lab serve
 | `task_eval.sh` | Each detector candidate on the task photos (accuracy only, OCR on CPU processes). |
 | `equiv.sh` | Proof that `--lazy 1` gives the same cell as `--lazy 0` for every task-photo pair and Task 3 request. |
 | `final.sh` | The final timing run (four outlines, lazy, edge-corrected outline), Task 3 both ways, one-outline comparison. |
-| `when_free.sh` | Waits until the shared GPU is quiet, runs `final.sh` with a GPU-load log, then releases the training queue. |
+| `final_all.sh`, `quiet_ab.sh`, `quiet_ab2.sh` | Timing runs gated on an idle GPU (wait until utilisation < 10% for 30 s), GPU load logged. |
+| `ab_speed.sh`, `prio_ab.sh`, `t3_ab.sh` | Interleaved speed A/B of the fixes (arena, lazy crops, ordered queue, priority queue, eager outlines). |
+| `close_runs.sh` | WhatsApp timing of the final reader and the equivalence of the scheduling fixes on all 814 pairs. |
+| `video_runs.sh`, `evidence_video.py` | Logged runs and, on the laptop, the evidence videos replayed from their logs (nothing decided in the video). |
+| `stop_mine.sh` | Stops this work's runners and OCR processes on the server (not the training queue, not other users). |
+
+Final reader (5 Nov): `aipc_main.py time|task3 ... --imgsz 544x960 --workers 27 --procs 24 --cls-cpu 1 --proc-threads 1
+--order skim --snap 1 --variants 1 --lazy 1 --ordered-prefetch 1 --priority 1` (Task 3 with `--procs 20`: 24 processes
+ran out of the shared card's memory). Task 1 1.07 s, Task 2 1.25 s, Task 3 median 1.6 s; same cells as without the
+scheduling options on all 814 task-photo pairs and 41 Task 3 requests (`equiv.sh`, `close_runs.sh`).
 
 Main options: `--det W --imgsz N` detector; `--procs N --proc-device cuda|cpu --proc-threads T --cls-cpu 1` OCR in N
 processes; `--order skim` likely box first (order only); `--variants 1` each box read from four outlines (as detected,
@@ -43,7 +52,10 @@ sides +-6%, ends +2%), green only if one reaches two sources and none reads anot
 slot truth for the 6 slots no run verified, read by Claude from the shelf photo (not owner review); `--snap 1` the
 PICKed box's drawn outline is edge-corrected (setting chosen on the dev photos by `snap_eval.py`), inside the PICK time;
 `--lazy 1` the other outlines of a box are skipped when its first outline already reads another identity (that box can
-never turn green under the variant rule).
+never turn green under the variant rule), and their crops are cut only when read; `--ordered-prefetch 1` every box's OCR
+calls queued from one thread in skim order (27 racing threads lost the order); `--priority 1` a priority queue in front of
+the processes (calls a read waits for, then a live box's other outlines, then the rest); `--barcode 1` experiment only
+(2 wrong Sled Bag greens: a GTIN is not compared with the requested date, see docs/HANDOFF.md).
 
 Decisions cannot be changed by the speed-ups: the OCR cache is keyed by the exact image bytes, the skim only orders the
 reads, and every box still gets the laptop's full read and the laptop's two-source rule. The edge correction only

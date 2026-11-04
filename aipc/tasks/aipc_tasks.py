@@ -52,14 +52,17 @@ SETS = {"t1_orig": (f"{TASK}/task1_braun.jpg", "Braun, DCB, 2.75mm, 30mm"),
 opts, args, it = {"--det": "", "--imgsz": "960", "--workers": "8", "--tag": "", "--runs": "5", "--ocr": "cuda",
                   "--algo": "HEURISTIC", "--prefetch": "0", "--ocr-workers": "16", "--order": "index", "--procs": "0",
                   "--proc-device": "cuda", "--proc-threads": "2", "--cls-cpu": "0", "--skim-procs": "0", "--variants": "0", "--claude-slots": "0",
-                  "--snap": "0", "--lazy": "0"}, [], iter(sys.argv[1:])
+                  "--snap": "0", "--lazy": "0", "--barcode": "0",
+                  "--ordered-prefetch": "0", "--eager-hits": "2", "--priority": "0"}, [], iter(sys.argv[1:])
 for a in it:
     if a in opts:
         opts[a] = next(it)
     else:
         args.append(a)
 cfg = config.load_config(config.resolve("config/box_pipeline_config_webcam_eleven.yaml"))
-cfg["verify"] = dict(cfg["verify"], decode_barcodes=False)
+# barcode decoding off as in the production config; --barcode 1 = experiment (zxing-cpp on the spine crop, an independent
+# source: the decoded GTIN must be an owner-verified catalog row), not a production change
+cfg["verify"] = dict(cfg["verify"], decode_barcodes=opts["--barcode"] == "1")
 catalog = Catalog(str(config.resolve(cfg["verify"]["catalog_csv"])))
 _m, _o = cfg["model"], cfg["ocr"]
 weights = opts["--det"] or os.path.join(os.path.dirname(H), "..", "models", "box_y26_maxB.pt")
@@ -136,8 +139,55 @@ if int(opts["--skim-procs"]):                 # the order-only skim on CPU proce
     list(SKIMPOOL.map(ocr_worker.run, [np.full((48, 200, 3), 255, np.uint8)] * int(opts["--skim-procs"]) * 3))
 
 
-def _submit(img, use_cls):
+class _Dispatcher:
+    """--priority 1: OCR calls wait in a priority queue and go to the processes at most 2 per process at a time:
+    0 = a call a running read waits for (cache miss), 1 = the other outlines of a box its first outline did not rule
+    out, 2 = first-outline calls in skim order. Without it the queue is first in, first out, and the other outlines
+    of the likely box wait behind every box's first outline (Task 3: the PICK came last, 5 Nov). Scheduling only:
+    every call still runs on the same input."""
+
+    def __init__(self, pool, limit):
+        import heapq
+        import itertools
+        self.heapq, self.pool, self.limit, self.heap, self.n = heapq, pool, limit, [], 0
+        self.seq, self.cv = itertools.count(), threading.Condition()
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def submit(self, img, use_cls, prio):
+        from concurrent.futures import Future
+        f = Future()
+        with self.cv:
+            self.heapq.heappush(self.heap, (prio, next(self.seq), img, use_cls, f))
+            self.cv.notify_all()
+        return f
+
+    def _loop(self):
+        while True:
+            with self.cv:
+                while not self.heap or self.n >= self.limit:
+                    self.cv.wait()
+                _, _, img, use_cls, f = self.heapq.heappop(self.heap)
+                self.n += 1
+            self.pool.submit(ocr_worker.run, img, use_cls).add_done_callback(lambda g, f=f: self._done(g, f))
+
+    def _done(self, g, f):
+        with self.cv:
+            self.n -= 1
+            self.cv.notify_all()
+        if g.exception() is not None:
+            f.set_exception(g.exception())
+        else:
+            f.set_result(g.result())
+
+
+DISPATCH = _Dispatcher(PPOOL, 2 * PROCS) if PPOOL and opts["--priority"] == "1" else None
+_prio = threading.local()          # priority class of the prefetch this thread is queueing
+
+
+def _submit(img, use_cls, prio=0):
     """Future of the tokens of one OCR call (process pool, or the thread pool's own engines)."""
+    if DISPATCH:
+        return DISPATCH.submit(img, use_cls, prio)
     if PPOOL:
         return PPOOL.submit(ocr_worker.run, img, use_cls)
     return OCRPOOL.submit(lambda im: [(t.text, t.conf, t.poly) for t in _orig_run(reader(), im, use_cls)], img)
@@ -153,7 +203,7 @@ def _cached_run(self, img, use_cls=True, count=True):
     with _LOCK:
         f = _CACHE.get(k)
         if f is None:
-            f = _CACHE[k] = _submit(img, use_cls)
+            f = _CACHE[k] = _submit(img, use_cls, 0 if count else getattr(_prio, "p", 2))
             STATS["miss" if count else "prefetched"] += 1
         elif count:
             STATS["hit"] += 1
@@ -192,7 +242,8 @@ for pool in (POOL, OCRPOOL):
 _CACHE.clear()
 
 
-def prefetch(crops):
+def prefetch(crops, prio=2):
+    _prio.p = prio
     for img in [i for c in (crops if isinstance(crops, list) else [crops]) for i in ocr_inputs(c)]:
         _cached_run(None, img, True, count=False)
 
@@ -216,17 +267,54 @@ def keys_of(name, groups):
 
 VARIANTS = [(0.0, 0.0), (0.06, 0.0), (-0.06, 0.0), (0.0, 0.02)] if opts["--variants"] == "1" else [(0.0, 0.0)]
 LAZY = opts["--lazy"] == "1"   # skip the other outlines of a box whose first outline reads another identity
+ORDERED = opts["--ordered-prefetch"] == "1"
+EAGER_HITS = int(opts["--eager-hits"])   # --lazy 1: all 4 outlines prefetched for boxes whose skim shows >= this many
+                                        # requested numbers (2 = both; speed only)
 
 
 def variant_crops(frame, g):
     """--variants 1: the box read from 4 outlines (as detected, sides 6% wider, 6% narrower, ends 2% longer), because
     the second source turned out to depend on a few pixels of outline (4 Nov: OpenVINO vs .pt outlines of model B
-    gave Task 1 TP 6 vs 4 / 3). Size-label outlines unchanged."""
+    gave Task 1 TP 6 vs 4 / 3). Size-label outlines unchanged. The first outline's crops are made at once, the other
+    three only when a read or a prefetch asks for them (same crops, later: the skim and the boxes the first outline
+    already rules out no longer pay for them)."""
+    return Outlines(frame, g)
+
+
+class Outlines(list):
+    """The crops of the 4 outlines of one box; items 1-3 are made on first access (score mode shares one box's
+    Outlines between the threads of its sizes, hence the lock)."""
+
+    def __init__(self, frame, g):
+        super().__init__([prepare_crops(frame, g, cfg)])
+        self._frame, self._g, self._lock = frame, g, threading.Lock()
+        if os.environ.get("AIPC_EAGER_CROPS") == "1":       # the earlier behaviour, for the speed A/B only
+            self._fill()
+
+    def _fill(self):
+        with self._lock:
+            if self._g is not None:
+                self.extend(_other_outlines(self._frame, self._g))
+                self._g = None
+
+    def __getitem__(self, k):
+        if k != 0:
+            self._fill()
+        return super().__getitem__(k)
+
+    def __iter__(self):
+        self._fill()
+        return super().__iter__()
+
+    def __len__(self):
+        return len(VARIANTS)
+
+
+def _other_outlines(frame, g):
     from copy import copy
     out = []
     for fw, fl in VARIANTS:
         if fw == 0 and fl == 0:
-            out.append(prepare_crops(frame, g, cfg))
             continue
         p = g.box.poly.astype(np.float64)
         c = p.mean(0)
@@ -247,13 +335,13 @@ def full(crops, req):
     reaches MATCH and no variant reads a conflicting identity (ignored / expired); then 'needs_confirmation'."""
     many = crops if isinstance(crops, list) else [crops]
     res = []
-    for k, c in enumerate(many):
+    for k in range(len(many)):                          # by index: Outlines makes items 1-3 only when reached
         if k == 1 and LAZY:
             if res[0][0] in ("ignored", "expired"):     # --lazy 1: a conflict on the first outline already rules out
                 return res[0]                           # MATCH, so the other outlines cannot change the cell
             if PREFETCH:
-                prefetch(many[1:])
-        ev, d, reason, *_ = read_target_evidence(*c, reader(), cfg, req, catalog, attempt=3, identity_verified=True)
+                prefetch(many[1:], 1)
+        ev, d, reason, *_ = read_target_evidence(*many[k], reader(), cfg, req, catalog, attempt=3, identity_verified=True)
         res.append((d, reason))
     if len(res) == 1:
         return res[0]
@@ -344,6 +432,7 @@ def quick_hits(box_crop, req):
 def read_all(frame, groups, req, t0):
     """Every box read for the request at once (POOL); --prefetch 1: its OCR calls started first on OCRPOOL;
     --order skim: boxes whose one-pass skim shows more requested numbers go first (order only). -> pick, done, t_skim"""
+    SNAPPED.clear()
     crops = [variant_crops(frame, g) if len(VARIANTS) > 1 else prepare_crops(frame, g, cfg) for g in groups]
     order, t_skim, hits = list(range(len(groups))), None, [0] * len(groups)
     if opts["--order"] in ("skim", "label") and req.diameter is not None:
@@ -351,12 +440,18 @@ def read_all(frame, groups, req, t0):
         hits = list(POOL.map(lambda c: fn(c[0] if isinstance(c, list) else c, req), crops))
         order.sort(key=lambda i: -hits[i])
         t_skim = time.perf_counter() - t0
-    def one(i):
+    def first_calls(i):              # --lazy 1: only the first outline, except boxes whose skim showed both numbers
         c = crops[i]
-        if PREFETCH:                 # this box's OCR calls all at once, when its read starts (--workers boxes at a time)
-            # --lazy 1: only the first outline, except boxes whose skim showed both requested numbers (speed only)
-            prefetch(c[0] if LAZY and isinstance(c, list) and hits[i] < 2 else c)
-        return full(c, req)
+        return c[0] if LAZY and isinstance(c, list) and hits[i] < EAGER_HITS else c
+
+    if PREFETCH and ORDERED:         # --ordered-prefetch 1: every box's calls queued from here in skim order, so the
+        for i in order:              # likely box is first in the OCR queue (with one prefetch per worker thread the 27
+            prefetch(first_calls(i))  # threads race and the order is lost on a loaded server; 4 Nov, night)
+
+    def one(i):
+        if PREFETCH and not ORDERED:  # this box's OCR calls all at once, when its read starts (--workers boxes at a time)
+            prefetch(first_calls(i))
+        return full(crops[i], req)
 
     futs = {POOL.submit(one, i): i for i in order}
     pick, done = None, []
@@ -399,8 +494,18 @@ def request_once(name):
     groups = boxes(frame)
     t_det = time.perf_counter() - t0
     pick, done, t_skim = read_all(frame, groups, req, t0)
+    t_all = time.perf_counter() - t0
     return {"read_photo_s": t_read, "detect_s": t_det - t_read, "boxes": len(groups), "pick": pick, "skim_s": t_skim,
-            "all_read_s": time.perf_counter() - t0, "matches": sorted(i for i, d, *_ in done if d == MATCH)}
+            "all_read_s": t_all, "matches": sorted(i for i, d, *_ in done if d == MATCH),
+            # log for the evidence videos (taken after the clock stopped): when each box's read ended, and the outlines
+            "events": [[i, d, round(t, 4), why] for i, d, t, why in done], **outlines(groups, pick)}
+
+
+def outlines(groups, pick):
+    out = {"polys": [np.round(g.box.poly, 1).tolist() for g in groups]}
+    if pick and pick[0] in SNAPPED:
+        out["pick_poly"] = np.round(SNAPPED[pick[0]], 1).tolist()
+    return out
 
 
 def timing(name):
@@ -409,7 +514,7 @@ def timing(name):
     picks = [r["pick"][1] for r in runs if r["pick"]]
     res = {"set": name, "request": SETS[name][1], "detector": weights, "imgsz": opts["--imgsz"], "workers": WORKERS,
            "prefetch": PREFETCH, "order": opts["--order"], "ocr_workers": opts["--ocr-workers"], "procs": PROCS, "proc_device": opts["--proc-device"],
-           "proc_threads": opts["--proc-threads"], "cls_cpu": opts["--cls-cpu"], "skim_procs": opts["--skim-procs"], "variants": len(VARIANTS), "lazy": LAZY, "snap": opts["--snap"],
+           "proc_threads": opts["--proc-threads"], "cls_cpu": opts["--cls-cpu"], "skim_procs": opts["--skim-procs"], "variants": len(VARIANTS), "lazy": LAZY, "snap": opts["--snap"], "barcode": opts["--barcode"], "ordered_prefetch": ORDERED, "eager_hits": EAGER_HITS, "priority": DISPATCH is not None,
            "cache": dict(STATS),
            "runs": len(runs), "picked_box": [r["pick"][0] if r["pick"] else None for r in runs],
            "matches_each_run": [r["matches"] for r in runs],
@@ -496,7 +601,8 @@ def task3(_name=None):
                "boxes": len(groups), "green_boxes": [ids[i] for i in greens],
                "pick_box": ids[pick[0]] if pick else None, "pick_s": round(pick[1], 3) if pick else None,
                "detect_s": round(t_det, 3), "all_read_s": round(t_all, 3),
-               "decisions": [[ids[i], d, why] for i, (d, why) in sorted(dec.items())]}
+               "decisions": [[ids[i], d, why] for i, (d, why) in sorted(dec.items())],
+               "events": [[i, d, round(t, 4)] for i, d, t, _ in done], "ids": ids, **outlines(groups, pick)}
         u_green = False
         for i, (d, _) in dec.items():
             if tgt in UNKNOWN and ids[i] == "U":                # only without --claude-slots             # one of the U slots is the target: truth per box unknown
@@ -514,7 +620,7 @@ def task3(_name=None):
     right = lambda x: x["pick_box"] == x["target"] or (x["target"] in UNKNOWN and x["pick_box"] == "U")  # noqa: E731
     green_t = [x["pick_s"] for x in live if x["pick_box"] and right(x)]
     res = {"detector": weights, "imgsz": opts["--imgsz"], "workers": WORKERS, "requests": len(rows),
-           "claude_slots": opts["--claude-slots"] == "1", "variants": len(VARIANTS),
+           "claude_slots": opts["--claude-slots"] == "1", "variants": len(VARIANTS), "procs": PROCS, "lazy": LAZY, "ordered_prefetch": ORDERED, "priority": DISPATCH is not None,
            "on_shelf": len(live), "on_shelf_green_right_box": len(green_t),
            "wrong_box_green": sum(1 for x in rows for b in x["green_boxes"]
                                   if b != x["target"] and not (b == "U" and x["target"] in UNKNOWN)),

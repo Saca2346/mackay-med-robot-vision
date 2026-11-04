@@ -2,6 +2,26 @@
 
 Newest entry first. One entry per finished piece of work: date, who, what changed, how it was tested, what is open.
 
+## 2026-11-05 - Claude Code: AI PC reader fixes, video evidence, a gap in the two-source rule (aipc/README.md)
+
+* OPEN, OWNER, SAFETY: a GTIN source (barcode or the GTIN text read by OCR) is compared with the request on product and
+  size only (`src/box_verifier.py` ~line 520), never with the requested date. All Sled Bags share one GTIN, so for a dated
+  Sled Bag request name text + GTIN = two sources on every Sled Bag. Found with barcode decoding on (AI PC experiment,
+  `--barcode 1`): K01 "permanent sled bag 2029-04-26" also turned K17 and K05 green (2 FP), 0 extra TP anywhere. Not
+  seen in any run with barcodes off (GTIN digits not read at those distances), but the OCR path is live in production.
+  Proposed: for a dated request a GTIN agrees only with the same printed date or the barcode's own expiry (AI 17). Not
+  changed: it is the owner's rule. Barcode decoding stays off.
+* Final AI PC reader (four outlines): Task 1 1.07 s, Task 2 1.25 s, WhatsApp 1.53 s (no box), Task 3 median 1.6 s (6 of
+  9 greens under 2 s; Accuforce 3.4-4.0 s). Under 2 s reached for all three; 1 s not with this reader (one outline:
+  Task 1 0.85 s but 3 of 7 held). Cells unchanged: 35/25/0/1574 (equiv on all 814 pairs + 41 requests).
+* Fixes, all scheduling only: lazy outline crops (Task 2 skim 1.16 -> 0.69 s), ordered prefetch (27 racing threads lost
+  the skim order; Task 2 2.99 -> 1.40 s on an idle GPU), priority queue (Task 3 2.5 -> 1.6 s), reader threads off the GPU
+  (OOM with 27 idle CUDA engines). The 4 Nov 16:25 0.68 / 1.02 s was a lucky race and is not reproducible. Earlier deck
+  claim "slow because of another user's job" was wrong; corrected in the deck.
+* Evidence videos replayed from run logs (`aipc/tasks/evidence_video.py`; laptop `results/aipc_20261104/videos/`).
+* Deck now 26 slides: computed confusion metrics (precision 100%, recall 58.3%, FP rate < 0.19% at 95%), architecture
+  table (params / GFLOPs), videos, fixes, rule gap. YOLO26s 1600 / YOLO11m paused (`det/PAUSE`) for the timing runs.
+
 ## 2026-11-04 - Claude Code: Tasks 1-3 on photos on the AI PC, detectors, tight outlines (aipc/README.md)
 
 * Whole request on the AI PC (RTX A5000 + 32 threads), laptop decision code unchanged: `aipc/tasks/aipc_tasks.py`

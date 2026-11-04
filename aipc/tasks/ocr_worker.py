@@ -33,7 +33,7 @@ def init(code_dir, device="cuda", threads=2, cls_cpu=False):
         shared 24 GB card (4 Nov evening). Allocation only; the computation is the same."""
         def __init__(self, params=None, **kw):
             p = dict(params or {})
-            if p.get("EngineConfig.onnxruntime.use_cuda"):
+            if p.get("EngineConfig.onnxruntime.use_cuda") and os.environ.get("OCR_ARENA", "same") == "same":
                 p["EngineConfig.onnxruntime.cuda_ep_cfg.arena_extend_strategy"] = "kSameAsRequested"
             super().__init__(params=p, **kw)
 
