@@ -653,10 +653,15 @@ class TrackState:
     evs: deque = field(default_factory=lambda: deque(maxlen=5))       # Evidence tiap bacaan, sejajar history
     dates: deque = field(default_factory=lambda: deque(maxlen=5))     # tanggal tercetak tiap bacaan (tuple, bisa kosong)
     expiry_src: str = ""               # asal `expiry`: "barcode" atau "teks" (tanggal tercetak, src/box_expiry.py)
+    look_p: float = -1.0               # product look model (src/box_product_id.py): p of the requested product, -1 = off
+    look_top: str = ""                 # ... its top class and p, for logs
+    look_other: int = 0                # ... model reads in a row sure of another product
+    look_veto: str = ""                # ... set after `veto_reads` of them: a MATCH is held as CONFIRM (never the reverse)
 
     def mark_stale(self) -> None:
         """Nomor kotak diragukan: SEMUA bacaan lama dibuang (bisa jadi milik kotak lain) dan bacaan dari crop yang
         diambil sebelum saat ini tidak dipakai (epoch naik)."""
+        self.look_other, self.look_veto = 0, ""          # the model's cross-check belonged to the doubted box too
         if self.history or self.pending:
             self.history.clear()
             self.support.clear()
@@ -685,6 +690,7 @@ class TrackState:
         rak dan mulai dari nol (+-10-20 s lagi per permintaan)."""
         evs = list(self.evs)
         self.logged, self.hint, self.hint_id, self.hint_frame = "", 0.0, "", -1000
+        self.look_p, self.look_top, self.look_other, self.look_veto = -1.0, "", 0, ""
         if not evs or len(evs) != len(self.history) or any(e is None for e in evs):
             self.history.clear()
             self.support.clear()
@@ -761,6 +767,8 @@ class TrackState:
         of THIS box must have been read and be that date. Otherwise it stays a candidate (never a PICK)."""
         if REQUIRED_EXPIRY is not None and self.expiry != REQUIRED_EXPIRY:
             return CANDIDATE
+        if self.look_veto:                 # product look model sure of another product (role A cross-check): hold
+            return CONFIRM
         return MATCH
 
 

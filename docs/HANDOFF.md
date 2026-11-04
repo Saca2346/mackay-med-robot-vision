@@ -2,8 +2,182 @@
 
 Newest entry first. One entry per finished piece of work: date, who, what changed, how it was tested, what is open.
 
+## 2026-11-04 - Claude Code: Tasks 1-3 on photos on the AI PC, detectors, tight outlines (aipc/README.md)
+
+* Whole request on the AI PC (RTX A5000 + 32 threads), laptop decision code unchanged: `aipc/tasks/aipc_tasks.py`
+  (server folder `~/Downloads/claude_offline_20261101/aipc_20261104/`). No production config change.
+* Time, photo on disk -> PICK, one outline, GPU shared with our training: Task 1 0.68 s, Task 2 1.02 s, Task 3 median
+  0.96 s (laptop 2.3-2.6 / 5.7-6.4 / live 2.0 s). Four outlines (final reader) while another user's benchmark held the GPU at
+  95-100%: 1.46 / 3.34 / 2.57 s; one outline under that load 0.99 / 1.76 s. `when_free.sh` reruns `final.sh` on a quiet GPU
+  (tag `final_B_free`), then removes `det/PAUSE`.
+* Same model B moved to the AI PC lost TP (OpenVINO vs .pt outlines differ by pixels at the GTIN text): fixed by reading 4
+  outlines (as detected, sides +-6%, ends +2%; green only if one reaches two sources and none reads another identity).
+  Task 1 6/1/0/56, Task 2 18/8/0/676, WhatsApp 2/5/0/42, Task 3 9/11/0/800: 0 FP in 1,574 pairs. `--lazy 1` skips the other
+  outlines when the first reads another identity: identical cells on all pairs (`equiv.sh`).
+* Detectors trained without the 28-Sep photo session (87 photos, 676 owner boxes): YOLO26s/m 1280, m 1600: recall 92-93%,
+  tight 1-1.5%; model B (SEEN) 96-98%. Model B kept. s 1600 and YOLO11m queued (`det/queue3.sh`).
+* Edge correction of the drawn outline (`det/snap_eval.py`, chosen on dev photos only): pipeline outlines tight 5.7 -> 14.0%,
+  end error 28.2 -> 17.8 px; sides short 13.4 -> 20.4%. Drawing only, never the read crops.
+* Product look model retrained on the owner's review of 4 Nov (`aipc/look/`): shelf 99.9-100%, role unchanged (order only).
+* Truth: Task photo sizes and 6 Task 3 slots (K08 K11 K12 K14 K19 K20) read by Claude, not owner-reviewed.
+* 1,223 old videos (10.9 GB) moved to the server with SHA-256 check before delete (`../arsip_video_20261104/`).
+* Deck "AI PC Vision Tasks 1-3" (20 slides, Claude Slides). `pytest tests`: 661 passed.
+
+## 2026-11-02 - Claude Code: Tasks 1-3 before and now, fresh numbers and deck (results/tasks_final_20261102/FINDINGS.md)
+
+* Photos with today's program: Task 1 6/1/0/56 (PICK box 2, 3.3 s), Task 2 18/8/0/676 (PICK box 16, 11.6 s), same as 29 Oct.
+* Task 3 replays of the 29 Oct recordings: 13 of 20 green, median 2.0 s, 0 wrong green, 0 of 21 absent green; look model on
+  gives the same count. Replays, not live; photo truth read by Claude, owner review pending.
+* Deck (9 slides, with videos: `build_videos.py`, `photo_videos.py`) rebuilt for Tasks 1-3 at the same Slides link; the
+  29-10 deck files are in `deck_29-10_backup/`.
+* Task 2 photo time fixed in the photo scripts only (`photo_tasks.ordered_scan`: skim every box once, read the box showing
+  both requested sizes first; order only, same decisions): Task 1 3.0 -> 2.3-2.6 s, Task 2 11.1 -> 5.7-6.4 s, same box in
+  33 of 33 timed requests; 4 of 24 sizes slower and sizes green nowhere +1.8-8.5 s. Designed on the same two photos: confirm
+  on a new photo. `photo_speed.py`, `speed_t*_drive.json`.
+* No production config change. `pytest tests`: 661 passed.
+
+## 2026-11-02 - Claude Code: product look model, role A (owner option A) integrated, off in production (results/look_ab_20261102/FINDINGS.md)
+
+* `src/box_product_id.py`: the product image model sets the reading order and acts as a cross-check. It holds a MATCH
+  as CONFIRM after 3 reads in a row that are sure of another product. It is never identity evidence, and the
+  two-source rule is unchanged. It runs in a background thread (CPU, 1 thread, every 10 frames).
+* Model: one B0 model (seed 2): 97.9% on the photo split, 100% on the sealed shelf at 60/115/126 px, 0 false
+  vetoes. Labels are machine-made; the owner's review is pending (review.html).
+* Replay A/B on 57 takes of 1 Nov:
+  * greens 17 → 20, wrong greens 0;
+  * OCR on other boxes 594 → 378;
+  * paired green median 6.89 → 4.40 s;
+  * frame median 225 → 211 ms;
+  * 1 hold, and it was correct (K20 Agent while K12 was requested).
+* Production configs and `data/box_classes.txt` are unchanged; the model is enabled only in the test profiles there.
+  `pytest tests` passes. Open: live A/B (`UJI_LOOK_LIVE.bat`), then the owner's OK before any production profile
+  change.
+
+## 2026-11-02 - Claude Code: offline server work (results/offline_server_20261101, results/id_model_20261102/FINDINGS.md)
+
+* Reading ceiling of the 1 Nov close recordings on trse-server (no time limit, 32,316 spine reads, 0 wrong GTINs): barcodes
+  decode at 126 px for Nagomi, Sapphire, Accuforce, Ryurei, Conqueror; never for NC Emerge, Agent; Scoreflex has no GTIN.
+* Product model (EfficientNet-B0) trained only on Leo's Drive photos (labels from file names, machine-made, not reviewed):
+  97-98% on other photos of 22 products; our shelf (sealed) 100% at 60/115 px, 88-99% at 126 px; 0 wrong at p >= 0.7;
+  unknown sibling products get confident wrong names (Agent -> NC Emerge). 58 ms for 12 spines on the laptop.
+* No live program, config or inventory change. Server folder ~/Downloads/claude_offline_20261101 only. `pytest tests` run.
+* Open: owner decides the model's role, the label review, and the photo set for item 4.
+
+## 2026-11-01 - Claude Code: live session at the owner's new calibration (results/live_20261030, FINDINGS.md)
+
+* Owner re-calibrated live (kal_20261101 PASS: 20 boxes, spine 53.6 px, sharpness 997). Claude ran three headless batches
+  from that position, charger on 52/52, TEST profiles in the session folder, production configs unchanged: A baseline 12/20
+  verified (median 2.54 s), C one OCR worker 12/20 (2.33 s, OCR call 718 vs 717 ms: no difference), B barcode ON 4/12, 0
+  barcodes read.
+* Single-shot slot count on live frame 0: 28/28 right (all 20 boxes detected on frame 0 in 52/52 takes); shelf order
+  order_today.csv read by Claude from the calibration photo (team to check). Position proposal with sections:
+  posisi_today_2sections.csv / _3sections.csv (data/rak/posisi.csv untouched).
+* The same 8 boxes never verify (K08 K09 K11 K12 K14 K19 K20 K21): text read many times, no REF / date / barcode as a
+  second source at 53.6 px. Next: camera at about 0.38 x (2 sections, spine about 140 px) and rerun B and A on one section.
+* B K07 first take: 18.5 s photo/video writer stall on frame 0 (one-off, unexplained).
+* Section run (results/live_20261101_seksi2, owner ran UJI_SEKSI2.bat): section 1 boxes were taken OFF the shelf, camera at
+  the same distance (12 in view, spine 58.8 px, calibration WARN bottom 2.4 %), so resolution was not tested. A 4/10 green,
+  B barcode ON 4/10 green, 0 barcodes. New greens: K09 Ryurei (1.89 s) and K21. Slot count with 12 in view: 8/8
+  (analyze_12inview.py). Still no second source: K08 K11 K12 K14 K19 K20. The real test needs the camera about 2x closer.
+* Deck for the mentor (5 slides, Claude Slides): https://claude.ai/artifact/WErUhZNcZK3zcTMfLWDTGX
+* Owner reruns 01-11: 20:36 (12 in view, 59.7 px) A 4/10, B 3/10, no barcode. 20:58 camera close (126.4 px, top/bottom
+  and left cut, WARN): text A 0/10 (product names out of frame), barcode B 5/10 green ON A DECODED BARCODE (K09, K13, K14
+  Sapphire, K18, K21; first live barcodes), median 7.8 s, best 1.85 s; OCR calls 1.6-2.0 s at that size. Slot count 48/48 over
+  all 9 batches (112 requests, charger 112/112). Never green so far: K08 NC Emerge, K11/K12 Conqueror, K19 Scoreflex, K20 Agent.
+* Geometry: a box is ~15x its spine, so a landscape 1080 frame holds a whole box only up to ~58 px. Reference frame for the
+  close camera: results/live_20261101_seksi2/make_reference.py -> reference/section2_target_card.json (+ _view.jpg), built
+  from the real full-shelf frame (NOT a measurement), ~110 px with the size/REF/date/barcode band centred; UJI_SEKSI2.bat now
+  opens the picture and passes --ref. Next mount test: camera in portrait.
+* Owner run 21:35 on the reference frame (114.6 px, label band centred, sharpness 3065, square, WARN top/bottom cut only):
+  text A 3/10 green (K13 K14 K18 on printed GTIN text + REF/name, 5.1-9.6 s); barcode B 4/7 green (K09 K13 K14 K18, 3.4-8.1 s),
+  K12 PROCESS_FAILED (exit 124, 180 s timeout), B stopped by Ctrl+C before K19-K21. Slot 7/7. OCR call median 1.7 s at this
+  size (0.72 s at 54 px), so greens take 5-10 s. Conqueror K12: owner-verified GTIN text read 6-7x but name cut -> 1 source.
+
+## 2026-10-30 - Claude Code: meeting 29-10 vision items 1-2, shelf sections and barcode vs distance (offline done; live open)
+
+* Sections (results/sections_20261030/summary.md): src/box_sections.py (FOV geometry, plan_sections, assign_sections,
+  slot_in_view), scripts/rak_seksi.py (plan / fov / card / assign; assign writes a copy only), optional `seksi` column
+  in data/rak/posisi.csv; src/box_demo.py counts the slot in the section at request time among the boxes still there
+  (section_slot) and sends section / slot / section_boxes to the robot. src/box_lock.py place match moved into
+  place_candidates (same behaviour). Single-shot test on the logged 29-10 Task 3 detections: map from live_batch, frame 0
+  of the 20 counted takes: slot from the row end 11/11 right, frame-place map 2/11 (camera 0.9 pitch aside, 32 % closer);
+  frame 0 ready 0.31 s vs live first right choice median 0.99 s. data/rak/posisi.csv (example) is NOT the shelf order of
+  29-10: proposal posisi_task3_observed.csv (14 machine-verified columns, team to check). Not wired into the live lock.
+* Barcode vs distance (results/barcode_distance_20261030/summary.md): real webcam frames today (spine 64-74 px) 1 code in
+  1200 readings (25 ms median); shrunk phone photos, same 59 spines: 63 px 42 %, 140 px 75 % (optimistic). Live test
+  prepared: UJI_BARCODE_JARAK.bat / uji_jarak.py (TEST profile copy per run, barcode ON). 651 passed.
+* Open: shelf width, camera distance, measured FOV, real positions (with Danny), dividers between sections, the live
+  barcode runs at ~0.45 x and ~0.30 x today's distance, then the section into the live lock after a live batch.
+
+* Calibration menu (30 Oct): results/sections_20261030/KALIBRASI_RAK.bat (framing check, card, FOV measurement, plan, assign);
+  `rak_seksi.py fov --save` keeps the measured FOV in results/sections_20261030/fov_measured.json and `plan` then uses it.
+* Vision timing, meeting point 3 (results/timing_20261030/summary.md): from the 29-10 Task 3 logs, 12 verified takes, median 2.19 s:
+  frame 0 at 0.33 s (frame 319 ms, about 3/s), right box read from 1.02 s (single-shot slot count: 0.31 s), OCR calls median 753 ms,
+  second consistent reading +0.52 s. Text-only floor with the current two-reading rule is about 1.3 s; about 0.6 s needs the barcode
+  route or a much faster OCR. Nothing re-run, no config changed.
+* Timing, OCR idle (results/timing_20261030/ocr_idle.log): whole-spine read 265 ms idle, 341 ms with the detector running, but 753 ms
+  live: the live program's own load (2 workers x 2 threads on 4 cores, capture, render, recording) is most of the slowdown; 4 threads
+  is slower than 2. Workers/threads A/B still open.
+* Owner's own run 30 Oct (results/sections_20261030): measured FOV 76.0 deg (25 cm = 960 px at 32 cm; data sheet 82.1, one
+  measurement), framing card Webcam_kalibrasi.json PASS: 20 boxes, spine 57.4 px (narrowest 45.4), margins left 21 % / right 12 %,
+  spine width trend -14 % left to right; 2 sections -> about 135 px, 3 sections -> about 203 px. Shelf width / distance for `plan`
+  and the position copy (menu 5) not run yet.
+
 ## 2026-10-23 - Owner decision: barcode stays OFF for the Sled Bags (recorded by Claude Code)
 
+* Model/runtime upgrade tests 28 Oct (`results/model_upgrade_20261028`, charger on, newer packages only in its `site/` folder, main venv untouched, no config changed):
+  detector FP32 OpenVINO 2026.4.0 vs 2026.4.1: same speed (56 ms iGPU) and identical boxes; NNCF INT8 full: 43 ms but outline IoU vs FP32 only 0.84; INT8 with the OBB head (model.23) kept FP32:
+  44 ms iGPU / 80 ms CPU (FP32 56 / 176), all 3,025 boxes matched, mean IoU 0.982. OCR on 229 saved spine crops: RapidOCR 3.10.0 = 3.9.2; OpenVINO backend 190-198 ms vs onnxruntime 316-327 ms
+  per crop with identical reads (113 REF right, 1 wrong). End-to-end replay, 33 webcam requests each: baseline 11/11 green median 1.38 s; OpenVINO OCR 11/11 median 0.98 s; OpenVINO OCR + INT8-head-FP32
+  and newer packages 11/11 median 1.18 s, all within 1.97 s; 0 false green in all three (one run each, replay frames 0.2 s apart). The old note in src/box_ocr.py (OpenVINO OCR slower, 9-10 Oct) did not
+  reproduce. NOT adopted: needs a live batch and the owner's OK. Other OCR engines on the server (same crops): docTR CRNN 105, docTR PARSeq (pretrained) 88 with 5 wrong, EasyOCR 4 with 27 wrong: none better.
+  Tesseract 12 right / 37 wrong. Server training of YOLO26n/s/m and YOLO11s-OBB (same data and recipe, 60 epochs, single seed; test = 544 frames of the 18-Oct day, never trained on, labels =
+  pose templates, not owner-reviewed), mAP50-95 at 960: YOLO26n 0.909, YOLO11s 0.918, YOLO26s 0.924, model A 0.927, YOLO26m 0.933 (mAP50 0.995 for all, saturated). Model B 0.991 is NOT comparable
+  (it trained on 18 Oct). YOLO26m is 124 ms vs 49 ms on the laptop iGPU, YOLO26n 24 ms: no architecture clearly beats YOLO26s here. Results in ~/Downloads/exp_arch_compare_20261028 (server, idle).
+  LIVE webcam comparison 28-29 Oct (owner calibrated WARN, AC, 2 rounds x 3 combinations x 11 present boxes, every run recalibrated WARN;
+  results/model_upgrade_20261028/live_20261028_235516, summary live_compare.py): green 19/22, 18/22, 19/22; within 2 s 10, 8, 7; median 1.99 / 2.17 /
+  2.28 s for baseline / OpenVINO OCR / OpenVINO OCR + INT8 head-FP32 + newer packages; 0 green with a field that disagrees with the box. Detector
+  73-78 -> 72 -> 60 ms per frame (INT8 consistently faster); OCR per reading 261-334, 262-328, 282-354 ms: the replay speed-up of OpenVINO OCR does not
+  hold live on the 2-core i3 (2 OCR workers x 2 threads + detector saturate the CPU). Run-to-run spread (baseline 6 vs 4 within 2 s) is larger than the
+  differences: no upgrade proven better live; not adopted. K07 green 1/6, K16 4/6, K21 3/6 (Accuforce REF reads) remain the limiting cases.
+  The isolated site had opencv-python-headless (no window functions: crash at the end of each case); moved to site_moved_out. Two runs that overlapped
+  on the camera after a stop that did not end the runner loop are in `_invalid_overlap`, the crashed run in `_failed_r1_3_headless_cv2` (excluded).
+  DRIVE PHOTOS 29 Oct (results/drive_photos_20261029/summary.md): all 67 JPEGs of the owner's product folder (39 + 28 Duplicates), production
+  config, every box read once: 1,577 boxes, 77 two-source (74 iVascular, 3 Terumo), all on the photo's own product, 0 on non-catalog photos;
+  Claude's visual spot check 24/24 sizes right (not owner review). Other catalog products only one source (no REF rule, barcode off). Name
+  matcher takes "NC Xperience" as Xperience Pro (65 boxes) and "Conqueror II/Epoch" as Conqueror NC Pro (45): name only, never green; stricter
+  matching needs the owner's OK. Elutax3 close-up: 0 boxes. Deck "Weekly Report 29 Oct" (Claude Slides, 5 slides, 3 videos) built from these.
+  TASKS 1-3 UPDATE 29 Oct (results/tasks_v2_20261029/summary.md): owner verified 16 B. Braun / CHROMA GTINs (drafted by Claude
+  from OCR'd GTIN text + REF, verified=0 until the owner's --review). Photos, model B: Task 1 Drive photo PICK 2.75 x 30
+  (GTIN text + REF), confusion 6/1/0/56; WhatsApp 1/6/0/42, no box. Task 2 Drive photo PICK 2.75 x 33, 18/8/0/676 (was
+  11/15/0/676); WhatsApp not scored (outlines merge). Task 3 live webcam 20-box shelf (62.5 px, WARN): 12/20 green, 0 wrong,
+  0/21 absent green; barcode-ON A/B on the 8 misses: 0 decoded, 0 green. Calibration: live CAMERA ANGLE guidance
+  (src/box_calib.py guidance(), scripts/kalibrasi_kamera.py draw_guidance(), --ref draws the target shelf), 6 tests,
+  638 passed. Deck "Vision Tasks 1-3 Update" (8 slides, 4 videos). Open: close-up stage for barcode brands, size-text
+  parse on the task labels, 8 CHROMA GTINs not enrolled, owner review of live crops.
+  Second pass, same day: evidence-panel fix (display only, src/box_crops.py): readable() picks the 90/270 turn with
+  read_as_is (OCR 180-degree classifier off; with it on, upside-down labels won), barcode_like() shows a located block
+  only with >= 8 bars and <= 5.5 spine widths; box_target_evidence passes panel_reader() to panel(); 3 tests, 641 passed.
+  Replay of the 20 live recordings with the fix (task3/replay_panelfix_20261029_181337): 14/20 green, 0 on a wrong box;
+  the counted result stays live 12/20. Deck now 9 slides: new box x request matrix slide (deck_matrix.py), replay videos,
+  camera slide from the two real calibration frames (camera_placement.py). Left: Scoreflex "3.0 mm" still passes as bars.
+  BARCODE BARS ONLY 30 Oct (results/barcode_crops_20261029/summary.md): owner asked for the barcode alone, no REF, in
+  the verification panel. src/box_crops.py find_barcode (cv2.barcode outline or locate_barcode block, deskewed, trimmed
+  to the bars by trim_to_bars: rows repeating one profile, columns inked top to bottom; >= 16 bars; grown at most twice),
+  barcode_only; pick_crops and the evidence panel use it (barcode_with_text removed); thin strips drawn taller in the
+  panel. Display / aiming only. Outlined: spine sheet 9/21 (9 of 12 with a 1-D code), GTIN evidence 23/29, task photos
+  65/86, Drive photos 824/1577; replay of the 20 live recordings 14/20 green, 0 wrong, crops on 8 boxes; videos
+  videos/task3_*_barcode.mp4. 644 passed.
+  ACCUFORCE PHOTOS 29 Oct (results/accuforce_photos_20261029/summary.md): the 2 Accuforce Drive photos, 70 scored boxes (68 Accuforce), truth =
+  printed labels read by Claude (ground_truth.csv, not owner review), every box asked for all 30 sizes and re-read per request (2,100 pairs),
+  barcode decoding on (test only): TP 43, FN 25, FP 0, TN 2,032. Barcode 0/68 decoded (~0.5 px per bar). REF from a label-band crop:
+  57/68 right, 0 wrong (experiment, not production). Only 3 of 30 Accuforce GTINs verified in the catalog. Deck "Accuforce Photo Test" (5 slides).
+* New `docs/ARCHITECTURE_ROADMAP.md` (27 Oct, proposal only, nothing built or tested): target "evidence-ledger" architecture and options per layer
+  (close-up second stage, constrained recognizers, calibrated sequential fusion, shelf-level assignment, masks / model-based pose, quantization, sealed test protocol),
+  each with the measured problem, cost, risk, evidence needed and priority; arXiv titles checked. The Sled Bag rule of 24 Oct and AGENTS.md rules are kept.
+* Live check of the Sled Bag decision, webcam, 24 Oct (`results/live_webcam_sled_20261024`, charger on, gate ON: calibration WARN, sharpness 597, bottom -2.2 % clipped): 11 of 11 present green
+  (Sled Bags K01 1.89, K05 1.50, K17 3.78, K03 6.22 s "text + printed date"; K10 green 1.99 s then lost), 4 of 11 within 2 s; 22 live negatives 0 false green (4 Sled Bags with another date one source).
+  One batch only; D455 was not connected, so no live D455 check of the rule yet.
 * OWNER DECISION 24 Oct (supersedes the "Sled Bags end at TEXT READ" consequence of the barcode-OFF decision): Permanent Sled Bag requests WITH a date may go green on name + the printed date equal to the
   requested date (two sources: `W_DATE`, atom `pd`, `printed_date_agrees` in `src/box_verifier.py`; AGENTS.md rule 1 notes the exception). Unchanged: the strict date gate (`REQUIRED_EXPIRY`, `_date_gate`),
   a request without a date (one source), a wrong date, every sized product. 4 new tests, 632 pass. Replay (`results/weekly_20261023/confusion_sled`, 33 requests per camera): webcam 11 of 11 present

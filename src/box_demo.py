@@ -39,13 +39,16 @@ class Position:
     level: str
     kolom: str = ""
     sumber: str = ""                  # "contoh" = belum dari tim, jangan dipakai di rumah sakit
+    seksi: str = ""                   # fixed section of the level (meeting 29-10, src/box_sections.py)
 
     def __str__(self) -> str:
-        return f"rack {self.rak}, level {self.level}" + (f", column {self.kolom}" if self.kolom else "")
+        return (f"rack {self.rak}, level {self.level}" + (f", section {self.seksi}" if self.seksi else "")
+                + (f", column {self.kolom}" if self.kolom else ""))
 
 
 def load_positions(path: str | pathlib.Path) -> dict[str, Position]:
-    """data/rak/posisi.csv: box_id,rak,level,kolom,sumber -> {box_id: Position}. Baris tanpa rak/level dilewati."""
+    """data/rak/posisi.csv: box_id,rak,level,kolom,sumber[,seksi] -> {box_id: Position}. Baris tanpa rak/level
+    dilewati."""
     path = pathlib.Path(path)
     out: dict[str, Position] = {}
     if not path.exists():
@@ -54,8 +57,23 @@ def load_positions(path: str | pathlib.Path) -> dict[str, Position]:
         for r in csv.DictReader(f):
             bid, rak, level = (r.get(k, "").strip() for k in ("box_id", "rak", "level"))
             if bid and rak and level:
-                out[bid] = Position(rak, level, r.get("kolom", "").strip(), r.get("sumber", "").strip())
+                rest = ((r.get(k) or "").strip() for k in ("kolom", "sumber", "seksi"))
+                out[bid] = Position(rak, level, *rest)
     return out
+
+
+def section_slot(box_id: str, positions: dict[str, Position], inv: Inventory) -> tuple[int | None, int]:
+    """(place of the box in its section counted from the section's left end, boxes in that section) among the boxes
+    still on the shelf: what the camera counts in one frame (src/box_sections.slot_in_view). A taken box leaves an
+    empty place, so the slot is counted now, not stored. (None, 0) without a section or column; every box on the
+    shelf has to be in the position table for the count to hold."""
+    p = positions.get(box_id)
+    if p is None or not p.seksi or not p.kolom.isdigit():
+        return None, 0
+    same = sorted((int(q.kolom), b) for b, q in positions.items()
+                  if (q.rak, q.level, q.seksi) == (p.rak, p.level, p.seksi) and q.kolom.isdigit()
+                  and not (b in inv.boxes and inv.boxes[b].status == STATUS_DIAMBIL))
+    return [b for _, b in same].index(box_id) + 1, len(same)
 
 
 # ------------------------------------------------------------------ satu permintaan
@@ -69,6 +87,8 @@ class LookupResult:
     reason: str = ""
     stock: list[str] = field(default_factory=list)  # semua box_id yang cocok (urut FEFO)
     time: str = ""
+    slot: int | None = None                        # place in its section among the boxes on the shelf (section_slot)
+    section_boxes: int = 0
 
 
 def pick_box(cands: list[InvBox], positions: dict[str, Position]) -> tuple[InvBox | None, str]:
@@ -107,6 +127,7 @@ def lookup(text: str, inv: Inventory, positions: dict[str, Position], today: dt.
     res.box, res.status = pick_box(cands, positions)
     if res.box is not None:
         res.position = positions.get(res.box.box_id)
+        res.slot, res.section_boxes = section_slot(res.box.box_id, positions, inv)
     if res.status == NO_POS:
         res.reason = "position not in the position table: " + ", ".join(res.stock)
     elif res.position is not None and res.position.sumber == "contoh":
@@ -132,6 +153,9 @@ def to_tm_message(res: LookupResult) -> dict:
         "rack": pos.rak if pos else "",
         "level": pos.level if pos else "",
         "column": pos.kolom if pos else "",
+        "section": pos.seksi if pos else "",
+        "slot": "" if res.slot is None else res.slot,
+        "section_boxes": res.section_boxes or "",
         "stock_count": len(res.stock),
         "needs_doctor_confirmation": True,      # selalu: konfirmasi akhir ada di dokter (meeting 05-10)
         "reason": res.reason,
@@ -148,7 +172,8 @@ def to_text(res: LookupResult) -> str:
         exp = f", expiry {res.box.expiry}" if res.box.expiry else ""
         lines.append(f"Box        : {res.box.box_id} ({res.box.label()}{exp})")
     if res.position is not None:
-        lines.append(f"Position   : {res.position}")
+        slot = "" if res.slot is None else f" (box {res.slot} of {res.section_boxes} from the section's left end)"
+        lines.append(f"Position   : {res.position}{slot}")
     if res.stock:
         lines.append(f"Stock      : {len(res.stock)} box(es) ({', '.join(res.stock)})")
     if res.reason:

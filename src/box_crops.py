@@ -7,15 +7,16 @@ this costs nothing for the other boxes.
 
   spine       the box's spine, straightened and turned upright (long side vertical)
   size_label  the size label(s) the detector found inside the box (what the OCR read)
-  barcode     the barcode inside the spine, DECODED (zxing: exact corners, GTIN / LOT / expiry) or, when it is too
-              small to decode from this distance, only LOCATED by its bar pattern (strong contrast across the bars,
-              little along them, a compact block), so the scanner on the arm / at the basket can be aimed at it.
-              `barcode_decoded` says which; a located barcode is a position, never evidence.
+  barcode     the barcode inside the spine, bars only (no REF / LOT line, no digits): DECODED (zxing: exact corners,
+              GTIN / LOT / expiry) or, when it is too small to decode from this distance, only LOCATED (find_barcode:
+              OpenCV's barcode outline, else the bar-pattern block trimmed to its bars), so the scanner on the arm / at
+              the basket can be aimed at it. `barcode_decoded` says which; a located barcode is a position, never evidence.
 Corners are given in the camera frame (px), like the rest of grasp.jsonl.
 """
 from __future__ import annotations
 
 import re
+import threading
 
 import cv2
 import numpy as np
@@ -80,6 +81,290 @@ def locate_barcode(spine: np.ndarray):
             if s > best_s:
                 best, best_s = np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], np.float32), s
     return best, best_s
+
+
+def bar_count(spine: np.ndarray, corners) -> int:
+    """Median number of light/dark changes down the middle columns of a located block. A barcode crosses many thin
+    bars; a logo, a glare edge or a big numeral only a few (live 29-10, 62 px spines: logos and glare 3-6, real
+    barcodes 8-46)."""
+    g = cv2.cvtColor(spine, cv2.COLOR_BGR2GRAY) if spine.ndim == 3 else spine
+    x0, y0 = np.floor(np.asarray(corners).min(axis=0)).astype(int)
+    x1, y1 = np.ceil(np.asarray(corners).max(axis=0)).astype(int)
+    reg = g[max(0, y0):y1, max(0, x0):x1].astype(np.float32)
+    if reg.shape[0] < 4 or reg.shape[1] < 2:
+        return 0
+    w = reg.shape[1]
+    counts = []
+    for col in reg[:, w // 4:max(w // 4 + 1, 3 * w // 4)].T:
+        s = np.sign(col - col.mean())
+        s = s[s != 0]
+        counts.append(int((s[1:] != s[:-1]).sum()))
+    return int(np.median(counts))
+
+
+def barcode_like(spine: np.ndarray, corners, score: float, min_score: float = 0.3, min_bars: int = 8,
+                 max_aspect: float = 5.5) -> bool:
+    """Is a located block worth SHOWING as a barcode (display and aiming only, never evidence)? Bar pattern score,
+    enough bars, and not a whole printed label (Agent 29-10: a block 7 spine widths long)."""
+    if corners is None or score < min_score:
+        return False
+    c = np.asarray(corners)
+    return np.ptp(c[:, 1]) <= max_aspect * max(spine.shape[1], 1) and bar_count(spine, c) >= min_bars
+
+
+# ------------------------------------------------------------------ the barcode alone (owner review 29-10)
+# "Only the barcode, without the REF": the bars of a 1-D barcode, cut along their own outline, with no REF / LOT /
+# date line beside them and no digits under them. Display, aiming and the verification panel only, never evidence.
+_DETECTORS = threading.local()
+
+
+def _cv_detector():
+    """OpenCV's 1-D barcode detector (gradient based, gives the oriented outline of the bars), one per thread."""
+    if not hasattr(_DETECTORS, "d"):
+        try:
+            _DETECTORS.d = cv2.barcode.BarcodeDetector()
+        except Exception:  # noqa: BLE001 - an OpenCV build without the barcode module: located path only
+            _DETECTORS.d = None
+    return _DETECTORS.d
+
+
+def order_quad(q) -> np.ndarray:
+    """4 corners -> tl, tr, br, bl with tl -> tr along the LONG side (along the barcode, across its bars)."""
+    q = np.asarray(q, np.float32).reshape(4, 2)
+    d = q - q.mean(axis=0)
+    q = q[np.argsort(np.arctan2(d[:, 1], d[:, 0]))]
+    if np.linalg.norm(q[1] - q[0]) < np.linalg.norm(q[2] - q[1]):
+        q = np.roll(q, -1, axis=0)
+    if q[0, 0] > q[1, 0]:                                     # read left to right
+        q = np.roll(q, 2, axis=0)
+    return q
+
+
+def _quad_transform(quad, min_short: int = 0):
+    """Ordered outline -> (3x3 transform img -> straightened crop, crop width, crop height)."""
+    q = order_quad(quad)
+    L = max(2, int(round(max(np.linalg.norm(q[1] - q[0]), np.linalg.norm(q[2] - q[3])))))
+    S = max(2, int(round(max(np.linalg.norm(q[3] - q[0]), np.linalg.norm(q[2] - q[1])))))
+    s = max(1.0, min_short / S)
+    L, S = int(round(L * s)), int(round(S * s))
+    return cv2.getPerspectiveTransform(q, np.float32([[0, 0], [L - 1, 0], [L - 1, S - 1], [0, S - 1]])), L, S
+
+
+def warp_quad(img: np.ndarray, quad, min_short: int = 0) -> np.ndarray:
+    """The inside of an outline, straightened: long side horizontal (bars vertical, as a barcode is shown)."""
+    m, L, S = _quad_transform(quad, min_short)
+    return cv2.warpPerspective(img, m, (L, S), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+
+def bars_across(crop: np.ndarray) -> int:
+    """Light/dark changes along a straightened barcode crop (bars vertical), median over its middle rows."""
+    return bar_count(cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE),
+                     [[0, 0], [crop.shape[0], 0], [crop.shape[0], crop.shape[1]], [0, crop.shape[1]]])
+
+
+def _corr(a, b) -> float:
+    sa, sb = a.std(), b.std()
+    return float(((a - a.mean()) * (b - b.mean())).mean() / (sa * sb)) if sa > 1e-6 and sb > 1e-6 else 0.0
+
+
+def trim_to_bars(crop: np.ndarray, min_row_corr: float = 0.5):
+    """A straightened outline (bars vertical) cut to the bars -> (x0, y0, x1, y1) in crop px or None.
+
+    Every row through a barcode repeats the same light/dark profile and every bar runs the full height; the printed
+    lines around it do not (29-10 photos: the digits under the bars, the LOT / REF box and the BIOSENSORS logo at the
+    ends of a CHROMA barcode were inside OpenCV's outline). Rows: kept from the middle out while they repeat the middle
+    profile. Along the barcode: the longest run of bar edges whose columns are even top to bottom (see below)."""
+    g = (cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop).astype(np.float32)
+    S, L = g.shape
+    if S < 4 or L < 12:
+        return None
+    ref = np.median(g[S // 4:max(S // 4 + 1, 3 * S // 4)], axis=0)
+    rc = np.array([_corr(r, ref) for r in g])
+    top = bottom = S // 2
+    while top > 0 and max(rc[top - 1], rc[max(0, top - 2)]) >= min_row_corr:
+        top -= 1
+    while bottom < S - 1 and max(rc[bottom + 1], rc[min(S - 1, bottom + 2)]) >= min_row_corr:
+        bottom += 1
+    body = g[top:bottom + 1]
+    if body.shape[0] < 3:
+        return None
+    p = body.mean(axis=0)
+    edge = np.abs(np.diff(p, append=p[-1]))
+    even = cv2.blur(body.std(axis=0).reshape(1, -1), (3, 1)).ravel()
+    # a bar is ink from top to bottom; printed digits beside the bars (the expiry date next to an Accuforce barcode,
+    # live 30-10) are ink in the middle only: such columns, and the edges next to them, are not bars
+    n = body.shape[0]
+    light = float(np.percentile(p, 90))
+    ink = [np.clip(light - body[r0:r1].mean(axis=0), 0, None) for r0, r1 in ((0, max(1, n // 4)), (n // 4, max(n // 4 + 1, 3 * n // 4)),
+                                                                          (3 * n // 4, n))]
+    dark = ink[1] > 0.1 * (light - float(p.min()) + 1e-6)
+    short = dark & ((ink[0] < 0.4 * ink[1]) | (ink[2] < 0.4 * ink[1]))
+    short = cv2.dilate(short.astype(np.uint8).reshape(1, -1), np.ones((1, 5), np.uint8)).ravel().astype(bool)
+    xs = np.where((edge > 0.3 * np.percentile(edge, 95)) & (even < 0.6 * (p.std() + 1e-6)) & ~short)[0]
+    if len(xs) < 4:
+        return None
+    # one bar edge spans 1-3 px: neighbouring pixels are one edge; a bar run ends where the next edge is > 5 typical
+    # edge spacings away (a space inside a barcode is <= 4 modules, the quiet zone >= 10; a logo or label border
+    # beside the bars is one lone edge past the quiet zone)
+    edges = np.split(xs, np.where(np.diff(xs) > 1)[0] + 1)
+    centres = np.array([e.mean() for e in edges])
+    if len(centres) < 4:
+        return None
+    gap = max(3.0, 5.0 * float(np.median(np.diff(centres))))
+    runs, start = [], 0
+    for i in range(1, len(edges) + 1):
+        if i == len(edges) or centres[i] - centres[i - 1] > gap:
+            runs.append((i - start, edges[start][0], edges[i - 1][-1]))
+            start = i
+    _, a, b = max(runs)
+    pad = max(2, int(0.01 * L))
+    return max(0, a - pad), top, min(L, b + 1 + pad), bottom + 1
+
+
+def _deskew(img: np.ndarray, quad) -> np.ndarray:
+    """Outline turned to the lean of its bars: an outline square to the spine leaves the bars of a box photographed at
+    an angle slanted inside it (29-10 CHROMA photo: ~5 px over a 40 px bar), so no two rows repeat one profile. The
+    shift between the profiles of the top and the bottom band gives the lean; the outline becomes a parallelogram
+    along the bars (img px)."""
+    m, L, S = _quad_transform(quad)
+    if S < 8:
+        return quad
+    g = cv2.cvtColor(cv2.warpPerspective(img, m, (L, S), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE),
+                     cv2.COLOR_BGR2GRAY).astype(np.float32) if img.ndim == 3 else \
+        cv2.warpPerspective(img, m, (L, S), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+    band = max(2, S // 5)
+    yt, yb = S // 4, 3 * S // 4
+    top = g[max(0, yt - band // 2):yt + band // 2 + 1].mean(axis=0)
+    bot = g[max(0, yb - band // 2):yb + band // 2 + 1].mean(axis=0)
+    reach = max(1, min(L // 4, S))
+    shifts = range(-reach, reach + 1)
+    scores = [_corr(top[max(0, -d):L - max(0, d)], bot[max(0, d):L - max(0, -d)]) for d in shifts]
+    d = list(shifts)[int(np.argmax(scores))]
+    if d == 0:
+        return quad
+    k = d / float(yb - yt)                                    # x shift per row along a bar
+    mid = (yt + yb) / 2.0
+    s0, s1 = k * (0 - mid), k * (S - 1 - mid)
+    lean = np.float32([[s0, 0], [L - 1 + s0, 0], [L - 1 + s1, S - 1], [s1, S - 1]])
+    return to_frame(lean, m).astype(np.float32)
+
+
+def _grow(quad, shape, along: float = 0.5, across: float = 0.15) -> np.ndarray:
+    """Outline lengthened by `along` of its length at each end and widened by `across`, inside the image: OpenCV's
+    outline often covers only part of a blurred barcode (29-10 CHROMA photo: 20-60 % of it); trim_to_bars then finds
+    where the bars really end (the print and the quiet zone beyond them are not bar columns)."""
+    q = order_quad(quad)
+    u, v = (q[1] - q[0]), (q[3] - q[0])
+    g = np.float32([q[0] - along * u - across * v, q[1] + along * u - across * v,
+                    q[2] + along * u + across * v, q[3] - along * u + across * v])
+    h, w = shape[:2]
+    g[:, 0], g[:, 1] = g[:, 0].clip(0, w - 1), g[:, 1].clip(0, h - 1)
+    return g
+
+
+def _bars_only(img: np.ndarray, quad, min_bars: int):
+    """Outline -> outline of its bars alone (img px) and bars count, or (None, bars) when what is left is not a
+    barcode. The outline itself is checked first; a lengthened one (_grow) replaces it only when it is a barcode too
+    and longer (a lengthened outline of a clean barcode can take in print that breaks the check)."""
+    best = _bars_in(img, _deskew(img, quad), min_bars)
+    for _ in range(2):                                        # at most twice: 50 % then 50 % more at each end
+        if best[0] is None:
+            break
+        longer = _bars_in(img, _deskew(img, _grow(best[0], img.shape)), min_bars)
+        if longer[0] is None or np.linalg.norm(longer[0][1] - longer[0][0]) <= 1.02 * np.linalg.norm(best[0][1] - best[0][0]):
+            break
+        best = longer
+    return best
+
+
+def _bars_in(img: np.ndarray, quad, min_bars: int):
+    """One outline cut to its bars and checked (>= min_bars bars, rows repeating one profile)."""
+    m, L, S = _quad_transform(quad)
+    crop = cv2.warpPerspective(img, m, (L, S), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    box = trim_to_bars(crop)
+    if box is None:
+        return None, 0
+    x0, y0, x1, y1 = box
+    bars = crop[y0:y1, x0:x1]
+    g = (cv2.cvtColor(bars, cv2.COLOR_BGR2GRAY) if bars.ndim == 3 else bars).astype(np.float32)
+    ref = np.median(g, axis=0)
+    rows = float(np.median([_corr(r, ref) for r in g]))
+    n = bars_across(bars)
+    if n < min_bars or rows < 0.9 or x1 - x0 < 12 or y1 - y0 < max(4, 0.04 * (x1 - x0)):   # not a thin strip of colour
+        return None, n
+    corners = np.float32([[x0, y0], [x1 - 1, y0], [x1 - 1, y1 - 1], [x0, y1 - 1]])
+    return to_frame(corners, m).astype(np.float32), n
+
+
+def _merge(rects):
+    """Pieces of one barcode (a low-resolution spine breaks it into 2-4 outlines) -> one outline per barcode."""
+    rects = [list(r) for r in rects]
+    merged = True
+    while merged and len(rects) > 1:
+        merged = False
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                si, sj = cv2.minAreaRect(np.float32(rects[i]))[1], cv2.minAreaRect(np.float32(rects[j]))[1]
+                both = cv2.minAreaRect(np.float32(rects[i] + rects[j]))[1]
+                # merged outline barely thicker than its pieces and no longer than both end to end: one line
+                if min(both) <= 1.6 * max(min(si), min(sj)) and \
+                        max(both) <= max(si) + max(sj) + 3.0 * max(1.0, min(min(si), min(sj))):
+                    rects[i] = rects[i] + rects[j]
+                    del rects[j]
+                    merged = True
+                    break
+            if merged:
+                break
+    return [cv2.boxPoints(cv2.minAreaRect(np.float32(r))) for r in rects]
+
+
+def find_barcode(img: np.ndarray, min_bars: int = 16, min_aspect: float = 1.8):
+    """Outline of the bars of a 1-D barcode in a spine crop (any orientation) -> (corners (4, 2) tl, tr, br, bl in
+    img px, bars count) or (None, 0). Candidates: OpenCV's barcode detector (spines under 100 px across enlarged for it,
+    pieces on one line merged; long side >= min_aspect x short side), else the bar-pattern block of locate_barcode.
+    Each is cut to its bars (trim_to_bars) and kept only with >= min_bars bars and rows that repeat one profile
+    (29-10: real barcodes 25-196 bars; "MR", "mm", the "0" of a "10", "angiolite" and "TE" 9-13 bars or uneven rows)."""
+    if img is None or img.size == 0 or min(img.shape[:2]) < 8:
+        return None, 0
+    cands = []
+    det = _cv_detector()
+    f = min(4.0, max(1.0, 100.0 / min(img.shape[:2])))
+    big = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_CUBIC) if f > 1 else img
+    if det is not None:
+        try:
+            ok, pts = det.detect(big)
+        except cv2.error:
+            ok, pts = False, None
+        if ok and pts is not None and len(pts):
+            for q in _merge([list(map(tuple, p)) for p in np.asarray(pts, np.float32).reshape(-1, 4, 2)]):
+                q = order_quad(q)
+                short = np.linalg.norm(q[3] - q[0])
+                if short >= 2 and np.linalg.norm(q[1] - q[0]) >= min_aspect * short:
+                    cands.append(q)
+    if not cands:
+        upright, turned = (big, False) if big.shape[0] >= big.shape[1] else (cv2.rotate(big, cv2.ROTATE_90_CLOCKWISE), True)
+        corners, score = locate_barcode(upright)
+        if corners is not None and score >= 0.3:
+            if turned:                                       # back to big px: upright (x, y) = (h - 1 - y, x) of big
+                corners = np.float32([[c[1], big.shape[0] - 1 - c[0]] for c in corners])
+            cands.append(order_quad(corners))
+    best, best_key = (None, 0), 0.0
+    for q in cands:
+        corners, n = _bars_only(big, q, min_bars)
+        if corners is not None:
+            key = n * np.linalg.norm(corners[1] - corners[0])  # the longest outline with the most bars
+            if key > best_key:
+                best, best_key = (order_quad(corners / f), n), key
+    return best
+
+
+def barcode_only(spine: np.ndarray):
+    """The barcode of a spine crop, bars only, straightened (bars vertical) -> (image, corners in spine px) or
+    (None, None)."""
+    corners, _ = find_barcode(spine)
+    if corners is None:
+        return None, None
+    return warp_quad(spine, corners), corners
 
 
 def numeral_crop(img, poly, unit=True):
@@ -160,19 +445,6 @@ def upright_date(image, reader):
         return image
 
 
-def barcode_with_text(spine, min_score=0.3):
-    """Located (not decoded) barcode of an upright spine with the print around it (REF text, dates) -> (image, score)
-    or (None, score). Below min_score the block is more likely a logo or text (K16 and K04 of 23-10 scored 0.14 and
-    0.10; the real barcodes of K07 and K21 0.39 and 0.44)."""
-    corners, score = locate_barcode(spine)
-    if corners is None or score < min_score:
-        return None, score
-    y0, y1 = int(corners[:, 1].min()), int(corners[:, 1].max())
-    h = y1 - y0
-    top, bottom = max(0, y0 - int(0.35 * h)), min(spine.shape[0], y1 + int(0.6 * h))
-    return spine[top:bottom, :].copy(), score
-
-
 def pick_crops(frame: np.ndarray, group, decode=None) -> dict:
     """The crops of one box. decode = src.box_barcode.decode_gs1 (or None: locate only)."""
     spine, m = rectify(frame, group.box.poly)
@@ -191,15 +463,11 @@ def pick_crops(frame: np.ndarray, group, decode=None) -> dict:
                 out["barcode_decoded"], out["barcode_text"] = True, code.raw or code.gtin
                 break
     if corners is None:
-        corners, out["barcode_score"] = locate_barcode(spine)
+        corners, out["barcode_score"] = find_barcode(spine)     # None for a logo or a printed label: nothing to aim at
     if corners is not None:
-        x0, y0 = np.floor(corners.min(axis=0)).astype(int)
-        x1, y1 = np.ceil(corners.max(axis=0)).astype(int)
-        pad = max(2, int(0.08 * spine.shape[1]))
-        x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
-        x1, y1 = min(spine.shape[1], x1 + pad), min(spine.shape[0], y1 + pad)
-        out["barcode"] = spine[y0:y1, x0:x1].copy()
-        out["barcode_px"] = to_frame([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], m).round(1).tolist()
+        # the bars alone, along their own outline: no REF / LOT line and no digits beside them (owner review 29-10)
+        out["barcode"] = warp_quad(spine, corners)
+        out["barcode_px"] = to_frame(order_quad(corners), m).round(1).tolist()
     return out
 
 
@@ -213,16 +481,19 @@ def _fit(img, h, max_w=None):
 
 def readable(img, reader=None):
     """A long crop turned so its text runs left to right: with an OCR reader the turn (90 / 270 degrees) that
-    reads with the higher confidence, without one 90 degrees clockwise."""
+    reads with the higher confidence, without one 90 degrees clockwise. The OCR's 180 degree classifier is off for
+    this choice (read_as_is): with it on, the upside-down turn reads as well and can win (owner review 29-10:
+    Accuforce, Ryurei, Conqueror and Nagomi size labels upside down in the panel). Display only."""
     if img is None or img.shape[0] <= img.shape[1] * 1.2:
         return img
     turns = [cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE), cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)]
     if reader is None:
         return turns[0]
-    conf = []
-    for t in turns:
-        toks = reader.read_once(t).tokens
-        conf.append(sum(x.conf * len(x.text) for x in toks))
+    read = getattr(reader, "read_as_is", None) or reader.read_once
+    try:
+        conf = [sum(x.conf * len(x.text) for x in read(t).tokens) for t in turns]
+    except Exception:  # noqa: BLE001 - never lose the evidence panel over a display detail
+        return turns[0]
     return turns[int(np.argmax(conf))]
 
 
@@ -244,7 +515,11 @@ def panel(crops: dict, fields: dict, height: int = 300, reader=None) -> np.ndarr
     parts = [block(crops.get("spine"), "spine", 60)]
     bc = crops.get("barcode")
     if bc is not None and bc.shape[0] > bc.shape[1]:
-        bc = cv2.rotate(bc, cv2.ROTATE_90_CLOCKWISE)             # bars upright, as a barcode is usually shown
+        bc = readable(bc, reader)                                # bars upright, its printed digits the right way up
+    if bc is not None and bc.shape[1] > 3 * bc.shape[0]:
+        # a bars-only crop of a far spine is a thin strip (13 x 152 px live); a 1-D code carries nothing along its
+        # bars, so it is shown taller (bars stretched, never squeezed across) to stay visible in the panel
+        bc = cv2.resize(bc, (bc.shape[1], bc.shape[1] // 3), interpolation=cv2.INTER_LINEAR)
     if not crops.get("barcode_disabled", False):
         parts.append(block(bc, "barcode, " + ("decoded" if crops.get("barcode_decoded") else
                                               "located (not decoded)" if bc is not None else "not found"), 380))

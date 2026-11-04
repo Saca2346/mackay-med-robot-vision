@@ -13,6 +13,11 @@ image. These are image checks, not intrinsic lens calibration or proof of barcod
 1 = FAIL. --ref compares with the card of an earlier session: how far the camera moved (px), the change of distance
 (scale) and roll; with --same-position a move beyond 25 px / 8 % / 2 deg is a WARN.
 
+Live camera-angle guidance (right side of the preview, updated every frame): roll of the boxes and of the shelf line, whether
+the camera faces the shelf squarely (spine width left to right), left-right / up-down centring, each with the move to make
+(pan, tilt, turn, closer / back). With --ref the dashed orange frame is the shelf of the reference session: move the camera
+until the shelf fills it, then the same-position checks at the end pass.
+
 The camera is read in a background thread: the window never waits for the camera, so it does not freeze ("Not
 Responding") when the D455 is slow or reconnects; a stalled camera is shown on screen instead.
 """
@@ -32,7 +37,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from src.box_calib import (STILL_MAX, camera_motion, compare, judge, judge_move, measure,
+from src.box_calib import (STILL_MAX, camera_motion, compare, guidance, judge, judge_move, measure,
                           parse_region, region_polygons, spines, verdict)  # noqa: E402
 from src.box_camera import open_camera, sharpness  # noqa: E402
 from src.box_detector import BoxDetector  # noqa: E402
@@ -131,6 +136,39 @@ def draw(frame, polys, checks, title, display=None, *, live=False, roi=None):
     return vis
 
 
+def draw_guidance(frame, hints, ref=None):
+    """Right-hand panel with one line per hint (value, then the move to make) and a roll gauge; dashed frame = reference shelf."""
+    vis = frame.copy()
+    h, w = vis.shape[:2]
+    if ref is not None and ref.get("frame") == [w, h] and all(k in ref for k in ("edge_left_px", "edge_right_px", "edge_top_px", "edge_bottom_px")):
+        x1, x2, y1, y2 = (round(ref[k]) for k in ("edge_left_px", "edge_right_px", "edge_top_px", "edge_bottom_px"))
+        orange = (0, 140, 255)
+        for a, b in (((x1, y1), (x2, y1)), ((x1, y2), (x2, y2)), ((x1, y1), (x1, y2)), ((x2, y1), (x2, y2))):
+            n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) // 24))
+            for i in range(0, n, 2):
+                p, q = (a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n),                        (a[0] + (b[0] - a[0]) * (i + 1) / n, a[1] + (b[1] - a[1]) * (i + 1) / n)
+                cv2.line(vis, (round(p[0]), round(p[1])), (round(q[0]), round(q[1])), orange, 3, cv2.LINE_AA)
+        cv2.putText(vis, "reference shelf", (x1 + 6, max(18, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, orange, 2, cv2.LINE_AA)
+    rows = [(f"{hh['status']:<4} {hh['key']}: {hh['value']}", COL[hh["status"]]) for hh in hints]
+    height = 34 + 28 * len(rows) + 24 * sum(hh["text"] != "OK" for hh in hints) + 8
+    x0 = max(0, w - 820)
+    region = vis[:min(height, h), x0:]
+    cv2.addWeighted(region, .35, np.full_like(region, 20), .65, 0, dst=region)
+
+    def put(txt, y, color, scale=0.62):
+        cv2.putText(vis, txt, (x0 + 12, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
+
+    put("CAMERA ANGLE (live)", 24, (255, 255, 255), 0.7)
+    y = 52
+    for hh, (txt, color) in zip(hints, rows):
+        put(txt, y, color)
+        y += 28
+        if hh["text"] != "OK":
+            put("-> " + hh["text"], y - 4, (255, 255, 255), 0.55)
+            y += 24
+    return vis
+
+
 class Screen:
     """Window or terminal output; show() always pumps the window events, so the window stays responsive."""
 
@@ -157,8 +195,8 @@ def stalled(scr, grab, age):
     return scr.show(img, f"waiting for the camera ({age:0.0f} s) ...", 50)
 
 
-def adjust(scr, grab, det, sesi, min_boxes=3, roi=None):
-    """Live view until Enter / q (True) or ESC (False)."""
+def adjust(scr, grab, det, sesi, min_boxes=3, roi=None, ref=None):
+    """Live view until Enter / q (True) or ESC (False). ref = card of an earlier session: its shelf is drawn as a target."""
     last_n, vis = -1, None
     while True:
         f, n, age = grab.latest()
@@ -172,7 +210,8 @@ def adjust(scr, grab, det, sesi, min_boxes=3, roi=None):
                                     (f.shape[1], f.shape[0]), roi)
             card = measure(polys, (f.shape[1], f.shape[0]), [sharpness(f)], 0.0)
             checks = [c for c in judge(card, min_boxes) if c["check"] != "camera still"]
-            vis, last_n = draw(f, polys, checks, f"{sesi}: live - Enter = measure, ESC = cancel", live=True, roi=roi), n
+            vis = draw(f, polys, checks, f"{sesi}: live - Enter = measure, ESC = cancel", live=True, roi=roi)
+            vis, last_n = draw_guidance(vis, guidance(card, ref), ref), n
         k = scr.show(vis, wait_ms=10)
         if not scr.title or k in (ord("q"), 13):
             return True
@@ -242,6 +281,7 @@ def main() -> int:
     m = cfg["model"]
     det = BoxDetector(str(resolve(m["weights"])), m["task"], m["imgsz"], m["device"], m["conf"], m["iou"],
                       cfg["classes"], fixed_input=m.get("fixed_input", False))
+    ref_card = json.loads(pathlib.Path(resolve(a.ref)).read_text(encoding="utf-8"))["card"] if a.ref else None
     cam, idx, size = open_camera(cfg["camera"], None)
     if cam is None:
         print("Cannot open the configured camera: check its index/backend, USB connection and other camera programs.")
@@ -250,7 +290,7 @@ def main() -> int:
     grab = Grabber(cam)
     scr = Screen(None if a.no_window else f"Calibration {a.sesi}", size)
     try:
-        if not adjust(scr, grab, det, a.sesi, a.min_boxes, a.roi):
+        if not adjust(scr, grab, det, a.sesi, a.min_boxes, a.roi, ref_card):
             print("cancelled")
             return 1
         frames, shift, moving = None, 0.0, 0.0

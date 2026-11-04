@@ -98,6 +98,7 @@ LOG_FIELDS = ["time", "request", "track", "state", "reason", "gtin", "lot", "exp
 
 
 READ_LOG = None       # --debug-readings: satu baris per bacaan (untuk memeriksa apakah nomor kotak pernah tertukar),
+LOOK = None           # product look model, role A (src/box_product_id.py): reading order + cross-check only
                       # plus baris decision=stale: kenapa nomor kotak diragukan (pasangan lemah / longgar / masuk layar)
 EXPIRY_NEED = 2       # bacaan yang harus memuat tanggal tercetak yang sama (= matching.require_consistent)
 EXPIRY_ALLOWED = None  # tanggal kedaluwarsa di inventaris untuk permintaan sekarang (None = tanpa --inventaris)
@@ -248,6 +249,14 @@ def update_hints(frame, groups, ids, tracker, targets, frame_idx, compare=None, 
         sig = signature(spine_crop(frame, g.box.poly))
         best = max((((compare or similarity)(sig, t_sig), bid) for bid, t_sig in targets), default=(0.0, ""))
         st.hint, st.hint_id, st.hint_frame = best[0], best[1], frame_idx
+        if LOOK is not None:
+            LOOK.adjust(st)                   # the product look's reading order survives the colour refresh
+    if LOOK is not None and LOOK.active:
+        LOOK.drain()                          # a finished background look is applied here (main thread)
+        if frame_idx - LOOK.last_submit >= LOOK.every:
+            seen = [(g, tid) for g, tid in zip(groups, ids) if tid >= 0 and box_width_px(g.box.poly) >= 16]
+            if LOOK.submit([tracker.state(t) for _, t in seen], frame, [g.box.poly for g, _ in seen]):
+                LOOK.last_submit = frame_idx
 
 
 ROI_FILE = "results/area_rak.json"   # area rak yang dipilih dengan tombol a (kamera tripod), dipakai lagi otomatis

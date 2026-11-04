@@ -35,7 +35,7 @@ def keeps_verified(state, required_expiry=None):
     date that no longer holds. (20-10: Accuforce 3.5 x 15 went green -> checking 3 times while only REF stopped
     repeating during the detail reads.)"""
     from src.box_verifier import COMBINE_WINDOW
-    if state.stale or len(state.support) != len(state.history):
+    if state.stale or len(state.support) != len(state.history) or getattr(state, "look_veto", ""):
         return False
     if required_expiry is not None and state.expiry != required_expiry:
         return False
@@ -218,6 +218,10 @@ def run(args):
     print(f"[target] {'two-source verification' if verifying else 'visual lock only'}; loading {weights.name}; no PICK/TAKEN or grasp output", flush=True)
     detector = BoxDetector(str(weights), model["task"], model["imgsz"], model["device"], model["conf"],
                            model["iou"], cfg["classes"], fixed_input=bool(model.get("fixed_input", False)))
+    from src.box_product_id import load as load_look
+    pipeline.LOOK = load_look(cfg, resolve("."))
+    if pipeline.LOOK is not None:
+        print(f"[look] product look model on (order + cross-check only): {len(pipeline.LOOK.classes)} products", flush=True)
     fast = cfg.get("visual", {}).get("fast_read", True)
     workers = min(2, max(1, int(cfg.get("visual", {}).get("workers", 1)))) if fast else 1
     def new_reader():
@@ -275,6 +279,9 @@ def run(args):
         candidates = inventory.candidates(req) if inventory is not None else []
         pipeline.EXPIRY_ALLOWED = {b.expiry_date() for b in candidates if b.expiry_date()} or None
         pipeline.EXPIRY_NEED = need
+        if pipeline.LOOK is not None:
+            pipeline.LOOK.set_request(req.product)
+            print(f"[look] request product {'known' if pipeline.LOOK.active else 'NOT known: model off'}", flush=True)
         hint_boxes = ([b for b in inventory.boxes.values() if b.product == req.product and b.status == "terverifikasi"]
                       if fast and inventory is not None else candidates)
         targets = [(b.box_id, b.signature()) for b in hint_boxes if b.signature() is not None]
@@ -469,6 +476,8 @@ def run(args):
                        "within_target": verified_seconds <= latency_target if verified_seconds is not None else None,
                        "evidence_mode": evidence_mode,
                        "sources": tracker.state(selected).combined_sources() if selected is not None else "",
+                       "look": (tracker.state(selected).look_top, round(tracker.state(selected).look_p, 3),
+                                tracker.state(selected).look_veto) if selected is not None else None,
                        "outline_px": None if polygon is None else np.asarray(polygon).round(1).tolist(),
                        "evidence_supported": None if selected is None else not tentative,
                        "outline_use": "display only"}
@@ -561,7 +570,9 @@ def run(args):
                        "evidence_submit_ms": (evidence_end-outline_end)*1000,
                        "render_ms": (render_end-evidence_end)*1000,
                        "photo_video_present_ms": (present_end-render_end)*1000,
-                       "frame_ms": (present_end-frame_tick)*1000, "presentation": presentation}
+                       "frame_ms": (present_end-frame_tick)*1000, "presentation": presentation,
+                       "look_ms": pipeline.LOOK.last_ms if pipeline.LOOK is not None else None,
+                       "look_error": (pipeline.LOOK.error or None) if pipeline.LOOK is not None else None}
             latency_log.write(json.dumps(latency) + "\n")
             text_key = (request_generation, selected, tracker.state(selected).epoch) if text_read else None
             if text_read and text_key not in text_reports:

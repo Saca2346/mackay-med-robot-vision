@@ -3,7 +3,7 @@ import math
 
 import numpy as np
 
-from src.box_calib import compare, judge, judge_move, measure, spines, verdict
+from src.box_calib import compare, guidance, judge, judge_move, measure, spines, verdict
 
 W, H = 1280, 800
 
@@ -182,3 +182,54 @@ def test_a_shifted_camera_fails_and_a_hand_only_warns():
     c = measure(shelf(), (W, H), [700], shift, moving)
     assert shift < STILL_MAX and moving >= 5.0
     assert status(judge(c), "camera still") == "PASS" and status(judge(c), "nothing moving in view") == "WARN"
+
+
+def hint(hints, key):
+    return next(h for h in hints if h["key"] == key)
+
+
+def test_live_guidance_for_a_good_view_says_ok_everywhere():
+    c = measure(shelf(x0=330), (W, H), [700], 0.0)
+    assert all(h["status"] == "PASS" for h in guidance(c))
+
+
+def test_live_guidance_names_the_roll_direction():
+    left = hint(guidance(measure(shelf(lean_deg=-4), (W, H), [700], 0.0)), "roll")
+    right = hint(guidance(measure(shelf(lean_deg=4), (W, H), [700], 0.0)), "roll")
+    assert {right["status"], left["status"]} == {"WARN"}
+    assert right["text"] == "boxes lean right at the top: turn the camera clockwise"
+    assert left["text"] == "boxes lean left at the top: turn the camera counter-clockwise"
+
+
+def test_live_guidance_centring_tells_which_way_to_pan_and_tilt():
+    c = measure(shelf(x0=600, top=300), (W, H), [700], 0.0)             # shelf right of centre and low in the picture
+    g = guidance(c)
+    assert "pan the camera right" in hint(g, "shelf centred left-right")["text"]
+    assert "tilt the camera down" in hint(g, "shelf centred up-down")["text"]
+
+
+def test_live_guidance_against_a_reference_gives_the_move_back():
+    ref = measure(shelf(), (W, H), [700], 0.0)
+    moved = measure([p + (60, 45) for p in shelf()], (W, H), [700], 0.0)
+    g = guidance(moved, ref)
+    assert "pan the camera right" in hint(g, "left-right vs reference")["text"]
+    assert "tilt the camera down" in hint(g, "up-down vs reference")["text"]
+    assert hint(g, "distance vs reference")["status"] == "PASS"
+    closer = measure([spine(300 + 66 * i, width=61) for i in range(12)], (W, H), [700], 0.0)
+    assert "move the camera back" in hint(guidance(closer, ref), "distance vs reference")["text"]
+
+
+def test_square_to_the_shelf_is_only_judged_against_a_reference():
+    ref = measure(shelf(), (W, H), [700], 0.0)
+    skew = measure([spine(300 + 60 * i, width=45 + 3 * i) for i in range(12)], (W, H), [700], 0.0)
+    assert all(h["key"] != "square to the shelf vs reference" for h in guidance(skew))
+    h = hint(guidance(skew, ref), "square to the shelf vs reference")
+    assert h["status"] != "PASS" and "right end is closer" in h["text"]
+
+
+def test_live_guidance_without_boxes_fails_and_legacy_reference_cards_still_work():
+    assert guidance(measure([], (W, H), [700], 0.0))[0]["status"] == "FAIL"
+    legacy = {k: v for k, v in measure(shelf(), (W, H), [700], 0.0).items()
+              if k not in ("base_slope_deg", "width_trend_pct", "edge_top_px", "edge_bottom_px", "margin_top", "margin_bottom")}
+    g = guidance(measure(shelf(), (W, H), [700], 0.0), legacy)
+    assert all(h["status"] == "PASS" for h in g)

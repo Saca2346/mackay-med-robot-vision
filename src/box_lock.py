@@ -162,28 +162,9 @@ class TargetLock:
         if len(det) < 3:
             return None
         tids = [t for t, _ in det]
-        pts = np.array([p for _, p in det], np.float32)
-        offs = []
-        for x, y, w in places.values():
-            d = pts - (x, y)
-            k = int(np.argmin(np.hypot(d[:, 0], d[:, 1])))
-            if abs(d[k, 0]) < PLACE_MATCH * w and abs(d[k, 1]) < PLACE_DY:
-                offs.append(d[k])
-        if len(offs) < 3:
-            return None                                   # camera moved too far from the mapped view
-        sx, sy = np.median(np.array(offs), axis=0)
-        for bid in target_ids:
-            p = places.get(bid)
-            if p is None:
-                continue
-            x, y, w = p
-            d = pts - (x + sx, y + sy)
-            ok = np.abs(d[:, 1]) < PLACE_DY
-            if not ok.any():
-                continue
-            k = int(np.argmin(np.where(ok, np.abs(d[:, 0]), np.inf)))
+        for k, bid in place_candidates(np.array([p for _, p in det], np.float32), places, target_ids):
             t = tids[k]
-            if abs(d[k, 0]) < PLACE_TOL * w and t not in self.rejected and tracker.state(t).hint >= POS_MIN:
+            if t not in self.rejected and tracker.state(t).hint >= POS_MIN:
                 return t, bid
         return None
 
@@ -194,6 +175,35 @@ class TargetLock:
         if self.first is None:
             self.first = now
         self._say(now, f"#{tid} locked as {bid} by {why} (look {sim:.2f})")
+
+
+def place_candidates(pts, places: dict, target_ids):
+    """Shelf map -> the detected box standing at each requested box's mapped place, FEFO order: yields (index into
+    pts, inventory box). pts = detected spine centres (N, 2) as fractions of the frame; places = {box: (x, y, width)}
+    fractions. The camera shift is the median offset of the mapped boxes to their nearest detected box."""
+    if len(pts) < 3:
+        return
+    offs = []
+    for x, y, w in places.values():
+        d = pts - (x, y)
+        k = int(np.argmin(np.hypot(d[:, 0], d[:, 1])))
+        if abs(d[k, 0]) < PLACE_MATCH * w and abs(d[k, 1]) < PLACE_DY:
+            offs.append(d[k])
+    if len(offs) < 3:
+        return                                            # camera moved too far from the mapped view
+    sx, sy = np.median(np.array(offs), axis=0)
+    for bid in target_ids:
+        p = places.get(bid)
+        if p is None:
+            continue
+        x, y, w = p
+        d = pts - (x + sx, y + sy)
+        ok = np.abs(d[:, 1]) < PLACE_DY
+        if not ok.any():
+            continue
+        k = int(np.argmin(np.where(ok, np.abs(d[:, 0]), np.inf)))
+        if abs(d[k, 0]) < PLACE_TOL * w:
+            yield k, bid
 
 
 def _width(poly) -> float:

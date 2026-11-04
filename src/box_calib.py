@@ -99,9 +99,18 @@ def measure(polys: list, size: tuple[int, int], sharp: list[float], still_diff: 
     cut = sum(1 for p in ps if (min(p[:, 0].min(), p[:, 1].min()) < -0.1 * min(_short_long(p))
                                 or p[:, 0].max() > W * 1.0 + 0.1 * min(_short_long(p))
                                 or p[:, 1].max() > H * 1.0 + 0.1 * _short_long(p)[1]))
+    centres = np.array([p.mean(axis=0) for p in ps]) if ps else np.zeros((0, 2))
+    base_slope = trend = 0.0
+    if len(ps) >= 3 and np.ptp(centres[:, 0]) > 1:
+        # the shelf line (box bottoms) tilts with the camera roll; the spine width grows toward the nearer end of the shelf
+        base_slope = math.degrees(math.atan(np.polyfit(centres[:, 0], [p[:, 1].max() for p in ps], 1)[0]))
+        slope = np.polyfit(centres[:, 0], shorts, 1)[0]
+        trend = float(slope * np.ptp(centres[:, 0]) / np.mean(shorts) * 100)
     return {
         "frame": [int(W), int(H)],
         "boxes": len(ps),
+        "base_slope_deg": round(base_slope, 1),
+        "width_trend_pct": round(trend, 1),
         "width_px": round(float(np.median(shorts)), 1) if shorts else 0.0,
         "width_min_px": round(float(min(shorts)), 1) if shorts else 0.0,
         "tilt_deg": round(float(np.median(up)), 1) if up else 0.0,
@@ -229,6 +238,72 @@ def judge_move(cmp: dict, same_position: bool) -> dict:
     return {"check": "same position as the reference", "value": shown,
             "limit": "shift <= 25 px, scale +-8 %, roll +-2 deg", "status": "WARN" if bad else "PASS",
             "advice": "put the camera back where the reference session was taken" if bad else ""}
+
+
+YAW_WARN, CENTER_WARN = 6.0, 0.08          # width trend left to right (%), shelf off-centre (share of the frame)
+GUIDE_SHIFT, GUIDE_SCALE, GUIDE_ROLL = 25.0, 0.08, 2.0     # same limits as judge_move
+
+
+def guidance(card: dict, ref: dict | None = None) -> list[dict]:
+    """Live hints for placing the camera: [{key, status, value, text}] from a card measured on ONE live frame.
+
+    Without a reference card the target is a level, square, centred view. With one (a PASS card of an earlier session)
+    the target is the same view as that session: the shelf edges where they were, the same box width, the same roll.
+    Pitch cannot be measured from rectangles (the detector outlines are rectangles): vertical centring stands in for it.
+    Directions are for the camera: "pan right" moves the shelf toward the left of the picture."""
+    out = []
+
+    def add(key, status, value, text):
+        out.append({"key": key, "status": status, "value": value, "text": text if status != "PASS" else "OK"})
+
+    if not card["boxes"]:
+        return [{"key": "view", "status": "FAIL", "value": "no boxes", "text": "no box in view: point the camera at the shelf"}]
+    roll, base = card["tilt_deg"], card.get("base_slope_deg", 0.0)
+    r, boxes = (roll, True) if abs(roll) >= abs(base) else (base, False)       # both > 0 = the picture is turned clockwise
+    what = ("boxes lean right at the top" if r > 0 else "boxes lean left at the top") if boxes else (
+        "shelf line falls to the right" if r > 0 else "shelf line rises to the right")
+    add("roll", "PASS" if abs(r) < TILT_WARN else "WARN" if abs(r) < TILT_WARN * 2 else "FAIL", f"{r:+.1f} deg",
+        f"{what}: turn the camera " + ("clockwise" if r > 0 else "counter-clockwise"))
+    if ref is not None and "width_trend_pct" in ref and "width_trend_pct" in card:
+        # only RELATIVE to the reference: boxes of different products differ in thickness, so the absolute trend on a
+        # mixed shelf is not a camera angle
+        yaw = card["width_trend_pct"] - ref["width_trend_pct"]
+        add("square to the shelf vs reference", "PASS" if abs(yaw) < YAW_WARN else "WARN" if abs(yaw) < 2 * YAW_WARN else "FAIL",
+            f"{yaw:+.0f} % width trend",
+            "right end is closer than in the reference: turn the camera to the right (or move it right)" if yaw > 0 else
+            "left end is closer than in the reference: turn the camera to the left (or move it left)")
+    cx = (card["margin_left"] - card["margin_right"]) / 2
+    add("shelf centred left-right", "PASS" if abs(cx) < CENTER_WARN else "WARN", f"{cx:+.0%} of the width",
+        "shelf is too far right in the picture: pan the camera right" if cx > 0 else
+        "shelf is too far left in the picture: pan the camera left")
+    cy = (card["margin_top"] - card["margin_bottom"]) / 2
+    add("shelf centred up-down", "PASS" if abs(cy) < CENTER_WARN else "WARN", f"{cy:+.0%} of the height",
+        "shelf is too low in the picture: tilt the camera down" if cy > 0 else
+        "shelf is too high in the picture: tilt the camera up")
+    if ref is not None:
+        same = card["frame"] == ref["frame"] and card["boxes"] > 0 and abs(card["boxes"] - ref["boxes"]) <= 1
+        if not same:
+            add("same view as the reference", "WARN", f"{card['boxes']} vs {ref['boxes']} boxes",
+                "different number of boxes or resolution than the reference: the same boxes must be in view")
+        else:
+            dx = float(np.median([card["edge_left_px"] - ref["edge_left_px"], card["edge_right_px"] - ref["edge_right_px"]]))
+            dy = (float(np.median([card["edge_top_px"] - ref["edge_top_px"], card["edge_bottom_px"] - ref["edge_bottom_px"]]))
+                  if "edge_top_px" in ref and "edge_top_px" in card else 0.0)
+            add("left-right vs reference", "PASS" if abs(dx) <= GUIDE_SHIFT else "WARN", f"{dx:+.0f} px",
+                "shelf is right of the reference: pan the camera right" if dx > 0 else
+                "shelf is left of the reference: pan the camera left")
+            add("up-down vs reference", "PASS" if abs(dy) <= GUIDE_SHIFT else "WARN", f"{dy:+.0f} px",
+                "shelf is lower than the reference: tilt the camera down" if dy > 0 else
+                "shelf is higher than the reference: tilt the camera up")
+            sc = card["width_px"] / ref["width_px"] - 1.0 if ref.get("width_px") else 0.0
+            add("distance vs reference", "PASS" if abs(sc) <= GUIDE_SCALE else "WARN", f"{sc:+.0%} box width",
+                "boxes wider than the reference: move the camera back" if sc > 0 else
+                "boxes narrower than the reference: move the camera closer")
+            dr = roll - ref["tilt_deg"]
+            add("roll vs reference", "PASS" if abs(dr) <= GUIDE_ROLL else "WARN", f"{dr:+.1f} deg",
+                "more lean than the reference: turn the camera clockwise" if dr > 0 else
+                "less lean than the reference: turn the camera counter-clockwise")
+    return out
 
 
 def verdict(checks: list[dict]) -> str:

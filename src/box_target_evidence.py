@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from src.box_crops import barcode_with_text, best_date_crop, numeral_crop, pick_number_tiles, upright_date
+from src.box_crops import barcode_only, best_date_crop, numeral_crop, pick_number_tiles, upright_date
 from src.box_evidence import bright_label_crops, read_evidence, redecide
 
 
@@ -286,8 +286,8 @@ def save_evidence(root, run_id, req, tid, state, verified, seconds, time_basis):
         crops["barcode"] = None
         for code in ev.codes:
             if code.source == "barcode" and code.poly is not None:
-                from src.box_crops import rectify
-                crops["barcode"], _ = rectify(spine, code.poly)
+                from src.box_crops import warp_quad
+                crops["barcode"] = warp_quad(spine, code.poly)
                 crops["barcode_decoded"], crops["barcode_text"] = True, code.raw
                 cv2.imwrite(str(sub / "barcode_decoded.png"), crops["barcode"])
                 break
@@ -337,9 +337,7 @@ def save_evidence(root, run_id, req, tid, state, verified, seconds, time_basis):
         spine = next((e.capture["spine"] for e in reversed(state.evs)
                       if getattr(e, "capture", None) and e.capture["spine"] is not None), None)
         if spine is not None and last_crops.get("barcode") is None:
-            h, w = spine.shape[:2]
-            upright = rectify(spine, np.float32([[0, 0], [w-1, 0], [w-1, h-1], [0, h-1]]))[0]
-            located, _ = barcode_with_text(upright)
+            located, _ = barcode_only(spine)                    # the bars alone, no REF / LOT line (owner review 29-10)
             if located is not None:
                 cv2.imwrite(str(folder / "barcode_located.png"), located)
                 last_crops = dict(last_crops, barcode=located, barcode_disabled=False, barcode_decoded=False)
@@ -356,7 +354,7 @@ def save_evidence(root, run_id, req, tid, state, verified, seconds, time_basis):
             strip = cv2.copyMakeBorder(strip, 0, 0, 0, 100-strip.shape[1], cv2.BORDER_CONSTANT,
                                        value=(245, 245, 242))
         last_crops = dict(last_crops, size_labels=[strip])
-    pnl = panel(last_crops or {}, summary, height=340)
+    pnl = panel(last_crops or {}, summary, height=340, reader=panel_reader())
     cv2.rectangle(pnl, (0, 0), (pnl.shape[1]-1, pnl.shape[0]-1),
                   (0, 210, 0) if verified else (255, 220, 30), 3)
     cv2.imwrite(str(folder / "panel.png"), pnl)
