@@ -20,7 +20,11 @@ Newest entry first. One entry per finished piece of work: date, who, what change
   claim "slow because of another user's job" was wrong; corrected in the deck.
 * Evidence videos replayed from run logs (`aipc/tasks/evidence_video.py`; laptop `results/aipc_20261104/videos/`).
 * Deck now 26 slides: computed confusion metrics (precision 100%, recall 58.3%, FP rate < 0.19% at 95%), architecture
-  table (params / GFLOPs), videos, fixes, rule gap. YOLO26s 1600 / YOLO11m paused (`det/PAUSE`) for the timing runs.
+  table (params / GFLOPs), videos, fixes, rule gap.
+* Last two detector candidates trained after the timing runs (`det/queue3.sh`, `det/queue4.sh`, one at a time): on the
+  28-Sep test YOLO26s 1600 recall 91.3% / precision 86.9% / tight 1.1%, YOLO11m 1280 90.2% / 87.3% / 1.3%. Task photos
+  TP (T1 T2 WA T3, `tasks/task_eval.sh`, OCR on CPU): m1600 1 24 1 9, s1600 5 9 4 10, YOLO11m 3 8 3 10 (duplicate
+  outlines on the WhatsApp photo, 8 Task 3 stills not 20 boxes); 0 FP for all. None better everywhere: model B kept.
 
 ## 2026-11-04 - Claude Code: Tasks 1-3 on photos on the AI PC, detectors, tight outlines (aipc/README.md)
 

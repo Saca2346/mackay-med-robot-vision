@@ -14,7 +14,7 @@ untouched). Photos, recordings, models and inventory files stay on the lab serve
 | Script | What it does |
 |---|---|
 | `train_det.py MODEL IMGSZ BATCH [EPOCHS] [split] [PHOTO_MULT] [FRAME_STEP]` | Trains a candidate. `split hold` leaves out the 28-Sep photo session (the test); `hold2` leaves out 23 Sep; `all` = final. At most 60% of the shared GPU's memory; a file `PAUSE` holds the next job back. |
-| `queue.sh`, `queue2.sh`, `queue3.sh` | The candidate queues that were run (round 1: s/m at 1280; round 2: photo-weighted 1600 px, YOLO11m). |
+| `queue.sh`, `queue2.sh`, `queue3.sh`, `queue4.sh` | The candidate queues that were run (round 1: s/m at 1280; round 2: photo-weighted 1600 px, YOLO11m; round 3: YOLO26s at 1600 px, whose queue3 slot was stopped in epoch 1). |
 | `eval_det.py WEIGHTS IMGSZ NAME` | Held-out outline test on the 28-Sep photos: recall, precision, IoU, end / side errors ("past" or "short" of the box), share of tight boxes. |
 | `tightlib.py` | Shared truth loading, polygon IoU, matching, per-edge errors, the edge correction. |
 | `snap_eval.py WEIGHTS IMGSZ NAME` | Edge correction: settings chosen on the dev photos (23 Sep + 1 Oct) only, then applied once to the test. |
