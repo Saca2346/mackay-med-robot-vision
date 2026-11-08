@@ -8,7 +8,7 @@ PHOTO_MULT (default 2, as model B) = how often each photo is listed; FRAME_STEP 
 Recipe = model B's (exp_outline_max_20261020/train_max.py): 196 reviewed photos x2 + static-pose webcam frames (here every
 3rd frame, B used all), BadCamera augmentation, rotation +-180, AdamW 0.0005 cosine, close_mosaic 15, val off, last epoch
 kept (no checkpoint chosen on test data). Start: the official pretrained OBB weights (not model B, which saw the test
-photos). Reads the master project read-only; writes only under this folder. OOM on the shared GPU: resume, batch halved.
+photos); MODEL *-obb.yaml (YOLO12, no published OBB weights): the official detection weights, new OBB head. Reads the master project read-only; writes only under this folder. OOM on the shared GPU: resume, batch halved.
 """
 import glob
 import json
@@ -61,7 +61,10 @@ t0 = time.time()
 for attempt in range(7):
     try:
         if attempt == 0 or not os.path.exists(last):
-            YOLO(model).train(**args)
+            # an architecture without published OBB weights (YOLO12): built from its OBB yaml, the backbone and neck
+            # from the official pretrained detection weights (yolo12s-obb.yaml <- yolo12s.pt); the OBB head starts new
+            net = YOLO(model).load(model.replace("-obb.yaml", ".pt")) if model.endswith(".yaml") else YOLO(model)
+            net.train(**args)
         else:
             YOLO(last).train(resume=True)
         open(os.path.join(E, "runs", name, "done"), "w").write(f"{time.time() - t0:.0f} s\n")

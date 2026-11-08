@@ -1,0 +1,4 @@
+# accuracy of the speed options (8 Nov): --alt-lazy 1 (the other view's outlines read only when the box's own 4 give no
+# MATCH and no conflict) and --skim-name 1 (read order by product name too); cells incl. FP
+run rd_altz 900 score t1_drive t2_drive t1_orig --imgsz 544x960 $F --views $VB --alt-views 1 --alt-lazy 1 --skim-name 1 $R --procs 20
+run rd_altz_t3 1500 task3 --imgsz 544x960 $F --views $VB --alt-views 1 --alt-lazy 1 --skim-name 1 $R --procs 20 --claude-slots 1

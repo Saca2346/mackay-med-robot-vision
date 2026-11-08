@@ -1,0 +1,3 @@
+# --alt-views 1 with the other view's outline read in its 4 variants as well (aipc_tasks.py 8 Nov, second version)
+run rd_alta2 900 score t1_drive t2_drive t1_orig --imgsz 544x960 $F --views $VA --alt-views 1 $R --procs 20
+run rd_alta2_t3 1500 task3 --imgsz 544x960 $F --views $VA --alt-views 1 $R --procs 20 --claude-slots 1

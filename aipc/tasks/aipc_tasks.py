@@ -3,6 +3,7 @@
   python aipc_tasks.py score SET ... [--det W --imgsz N --workers K --tag T]   every box x every printed size (confusion)
   python aipc_tasks.py time  SET ... [--det W --imgsz N --workers K --runs R]  the mentor's request -> PICK time
   python aipc_tasks.py task3 [--det W --imgsz N --workers K]          the 41 Task 3 requests, each on its own shelf photo
+  python aipc_tasks.py live SETDIR ...                                  live webcam runs replayed (first still per take)
 
 Same decision code as the laptop (src/: prepare_crops, read_target_evidence, the two-source rule, data/gtin_catalog.csv
 read-only, production config, barcode decoding off as on the laptop photo test). What changes: the detector (any
@@ -52,8 +53,8 @@ SETS = {"t1_orig": (f"{TASK}/task1_braun.jpg", "Braun, DCB, 2.75mm, 30mm"),
 opts, args, it = {"--det": "", "--imgsz": "960", "--workers": "8", "--tag": "", "--runs": "5", "--ocr": "cuda",
                   "--algo": "HEURISTIC", "--prefetch": "0", "--ocr-workers": "16", "--order": "index", "--procs": "0",
                   "--proc-device": "cuda", "--proc-threads": "2", "--cls-cpu": "0", "--skim-procs": "0", "--variants": "0", "--claude-slots": "0",
-                  "--snap": "0", "--lazy": "0", "--barcode": "0",
-                  "--ordered-prefetch": "0", "--eager-hits": "2", "--priority": "0"}, [], iter(sys.argv[1:])
+                  "--snap": "0", "--refine": "0", "--refine-device": "cpu", "--draw-imgsz": "0", "--lazy": "0", "--barcode": "0",
+                  "--ordered-prefetch": "0", "--eager-hits": "2", "--priority": "0", "--views": "", "--split-sizes": "0", "--spine-size": "0", "--refine-webcam": "1", "--alt-views": "0", "--skim-name": "0", "--drive-outlines": "0", "--alt-lazy": "0"}, [], iter(sys.argv[1:])
 for a in it:
     if a in opts:
         opts[a] = next(it)
@@ -64,11 +65,20 @@ cfg = config.load_config(config.resolve("config/box_pipeline_config_webcam_eleve
 # source: the decoded GTIN must be an owner-verified catalog row), not a production change
 cfg["verify"] = dict(cfg["verify"], decode_barcodes=opts["--barcode"] == "1")
 catalog = Catalog(str(config.resolve(cfg["verify"]["catalog_csv"])))
+if opts["--split-sizes"] == "1":             # 7 Nov: joined printed sizes "3.533" -> "3.5 33" (size_split.py)
+    import size_split  # noqa: E402
+    size_split.install()
+if opts["--spine-size"] == "1":              # 7 Nov: the printed size on a spine without a detected size label
+    import size_split  # noqa: E402
+    size_split.install_spine_size(cfg)
 _m, _o = cfg["model"], cfg["ocr"]
 weights = opts["--det"] or os.path.join(os.path.dirname(H), "..", "models", "box_y26_maxB.pt")
 imgsz = [int(v) for v in opts["--imgsz"].split("x")] if "x" in opts["--imgsz"] else int(opts["--imgsz"])
 det = BoxDetector(weights, _m["task"], imgsz, "0", _m["conf"], _m["iou"], cfg["classes"],
                   fixed_input=isinstance(imgsz, list))
+if opts["--views"]:                     # 7 Nov: several views merged (multiview.py), for tilted and missed boxes
+    from multiview import MultiDetector  # noqa: E402
+    det = MultiDetector(opts["--views"], weights, _m["task"], _m["conf"], _m["iou"], cfg["classes"])
 WORKERS = int(opts["--workers"])
 TAG = opts["--tag"] or f"{os.path.basename(os.path.dirname(os.path.dirname(weights))) or 'modelB'}_{opts['--imgsz']}_w{WORKERS}"
 OUT = os.path.join(H, "out", TAG)
@@ -115,6 +125,7 @@ from concurrent.futures import Future  # noqa: E402
 from src.box_evidence import FULL_BOX_UPSCALE, FULL_BOX_UPSCALE_BELOW, OCR_MAX_SIDE, _cap, _tiles  # noqa: E402
 
 PROCS = int(opts["--procs"])                 # > 0: OCR in PROCS separate processes (ocr_worker.py), prefetch on
+OCR_VARIANT = os.environ.get("OCR_VARIANT", "v6s")   # the OCR engine of the processes (ocr_worker.py); v6s = laptop's
 PREFETCH = opts["--prefetch"] == "1" or PROCS > 0
 _CACHE, _LOCK, STATS = {}, threading.Lock(), Counter()
 _orig_run = SizeTextReader._run
@@ -249,8 +260,13 @@ def prefetch(crops, prio=2):
 
 
 def boxes(frame):
-    groups, _ = group_labels(det.detect(frame)[0], cfg["grouping"]["min_label_overlap"])
-    return sorted(drop_wide(groups), key=lambda g: tuple(np.round(g.box.poly.mean(axis=0)[::-1] / 150)))
+    dets = det.detect(frame)[0]
+    groups, _ = group_labels(dets, cfg["grouping"]["min_label_overlap"])
+    groups = drop_wide(groups)
+    if ALT_VIEWS:                    # 8 Nov, --alt-views 1: the other views' outlines of the same box (multiview.py)
+        from multiview import attach_alts
+        attach_alts(groups, getattr(dets, "alt", ()), cfg["grouping"]["min_label_overlap"])
+    return sorted(groups, key=lambda g: tuple(np.round(g.box.poly.mean(axis=0)[::-1] / 150)))
 
 
 def keys_of(name, groups):
@@ -268,6 +284,7 @@ def keys_of(name, groups):
 VARIANTS = [(0.0, 0.0), (0.06, 0.0), (-0.06, 0.0), (0.0, 0.02)] if opts["--variants"] == "1" else [(0.0, 0.0)]
 LAZY = opts["--lazy"] == "1"   # skip the other outlines of a box whose first outline reads another identity
 ORDERED = opts["--ordered-prefetch"] == "1"
+ALT_VIEWS = opts["--alt-views"] == "1" and bool(opts["--views"])   # 8 Nov: + the other views' outlines of a box
 EAGER_HITS = int(opts["--eager-hits"])   # --lazy 1: all 4 outlines prefetched for boxes whose skim shows >= this many
                                         # requested numbers (2 = both; speed only)
 
@@ -288,13 +305,18 @@ class Outlines(list):
     def __init__(self, frame, g):
         super().__init__([prepare_crops(frame, g, cfg)])
         self._frame, self._g, self._lock = frame, g, threading.Lock()
+        self._n = len(VARIANTS) * (1 + len(getattr(g, "alts", ())))   # --alt-views 1: + the other views' outlines
         if os.environ.get("AIPC_EAGER_CROPS") == "1":       # the earlier behaviour, for the speed A/B only
             self._fill()
 
     def _fill(self):
         with self._lock:
             if self._g is not None:
+                t = time.perf_counter()
                 self.extend(_other_outlines(self._frame, self._g))
+                with _STAGE_LOCK:
+                    STAGE["crop_more_s"] = STAGE.get("crop_more_s", 0.0) + time.perf_counter() - t
+                    STAGE["crop_more_boxes"] = STAGE.get("crop_more_boxes", 0) + 1
                 self._g = None
 
     def __getitem__(self, k):
@@ -307,10 +329,18 @@ class Outlines(list):
         return super().__iter__()
 
     def __len__(self):
-        return len(VARIANTS)
+        return self._n
 
 
 def _other_outlines(frame, g):
+    out = _variants(frame, g)
+    for a in getattr(g, "alts", ()):     # --alt-views 1: the box as another detector view outlined it, with its labels,
+        out.append(prepare_crops(frame, a, cfg))         # and the same 3 variants of that outline (8 Nov: rd_vb read
+        out += _variants(frame, a)                       # t1_drive:3 and t2_drive:13 with them, rd_alta without did not)
+    return out
+
+
+def _variants(frame, g):
     from copy import copy
     out = []
     for fw, fl in VARIANTS:
@@ -335,12 +365,19 @@ def full(crops, req):
     reaches MATCH and no variant reads a conflicting identity (ignored / expired); then 'needs_confirmation'."""
     many = crops if isinstance(crops, list) else [crops]
     res = []
+    n0 = min(len(VARIANTS), len(many)) if ALT_LAZY else len(many)
     for k in range(len(many)):                          # by index: Outlines makes items 1-3 only when reached
         if k == 1 and LAZY:
             if res[0][0] in ("ignored", "expired"):     # --lazy 1: a conflict on the first outline already rules out
                 return res[0]                           # MATCH, so the other outlines cannot change the cell
             if PREFETCH:
-                prefetch(many[1:], 1)
+                prefetch(many[1:n0], 1)
+        if k == n0:                                     # --alt-lazy 1 (8 Nov): the other view's outlines only when the
+            ds0 = [d for d, _ in res]                   # box's own 4 give no MATCH and no conflict; a MATCH there is
+            if MATCH in ds0 or any(d in ("ignored", "expired") for d in ds0):   # decided by the 4-outline rule of 7 Nov
+                break
+            if PREFETCH:
+                prefetch(many[n0:], 1)
         ev, d, reason, *_ = read_target_evidence(*many[k], reader(), cfg, req, catalog, attempt=3, identity_verified=True)
         res.append((d, reason))
     if len(res) == 1:
@@ -380,6 +417,7 @@ def score(name):
     missed = sorted(set(truth) - set(keys))
     res = {"set": name, "detector": weights, "imgsz": opts["--imgsz"], "boxes_detected": len(groups),
            "boxes_scored": len({p["key"] for p in pairs}), "truth_boxes": len(truth),
+           "ocr_variant": OCR_VARIANT, "views": opts["--views"], "alt_views": ALT_VIEWS, "skim_name": SKIM_NAME, "alt_lazy": ALT_LAZY,
            "truth_boxes_not_detected": missed, "detected_without_truth": sum(k is None for k in keys),
            "pairs": len(pairs), "cells": dict(cells)}
     json.dump({"summary": res, "pairs": sorted(pairs, key=lambda p: (p["box"], p["asked"]))},
@@ -429,20 +467,66 @@ def quick_hits(box_crop, req):
     return (req.diameter in nums) + (req.length in nums)
 
 
+SKIM_NAME = opts["--skim-name"] == "1"
+ALT_LAZY = opts["--alt-lazy"] == "1"
+
+
+def skim_text(box_crop):
+    if box_crop is None:
+        return ""
+    if SKIMPOOL:
+        return " ".join(t for t, c, _ in SKIMPOOL.submit(ocr_worker.run, skim_image(box_crop)).result() if c >= 0.5)
+    return " ".join(t.text for t in reader().read_once(skim_image(box_crop)).tokens if t.conf >= 0.5)
+
+
+def name_hit(text, req):
+    """Scheduling only, never evidence: 1 if a word (>= 4 letters) of the requested product name is in the skim text."""
+    import re
+    words = [w for w in re.findall(r"[a-z]+", (req.product or "").lower()) if len(w) >= 4]
+    low = text.lower()
+    return int(any(w in low for w in words))
+
+
+def skim_both(crops, req):
+    """--skim-name 1 (8 Nov): one skim pass -> (requested numbers seen, requested product name seen). Order only:
+    boxes showing the product name go first, then by numbers (Task 3: the Accuforce boxes' sizes are small on a dark
+    band and the 640 px skim missed them, so they were read 19th of 20)."""
+    text = skim_text(crops[1])
+    return hits_of(text, req), name_hit(text, req)
+
+
 def read_all(frame, groups, req, t0):
     """Every box read for the request at once (POOL); --prefetch 1: its OCR calls started first on OCRPOOL;
     --order skim: boxes whose one-pass skim shows more requested numbers go first (order only). -> pick, done, t_skim"""
     SNAPPED.clear()
+    STAGE.clear()
+    t_c = time.perf_counter()
     crops = [variant_crops(frame, g) if len(VARIANTS) > 1 else prepare_crops(frame, g, cfg) for g in groups]
+    STAGE["crop_s"] = time.perf_counter() - t_c      # first outline of every box (the other 3: crop_more_s, lazily)
     order, t_skim, hits = list(range(len(groups))), None, [0] * len(groups)
-    if opts["--order"] in ("skim", "label") and req.diameter is not None:
+    names = [0] * len(groups)
+    if SKIM_NAME and opts["--order"] == "skim":
+        both = list(POOL.map(lambda c: skim_both(c[0] if isinstance(c, list) else c, req), crops))
+        hits = [h for h, _ in both]
+        few = sum(n for _, n in both) <= max(3, len(groups) // 4)  # the name picks out a few boxes (not Task 2's 27
+        if few:                                                    # Chroma): they go first and their 4 outlines are
+            names = [n for _, n in both]                           # queued at once; otherwise the numbers alone
+        order.sort(key=lambda i: (-names[i], -hits[i]))
+        t_skim = time.perf_counter() - t0
+        STAGE["skim_s"], STAGE["order"] = round(t_skim, 4), order[:]            # diagnosis only (8 Nov)
+        STAGE["name_seen"], STAGE["hits"] = [n for _, n in both], hits[:]
+    elif opts["--order"] in ("skim", "label") and req.diameter is not None:
         fn = label_hits if opts["--order"] == "label" else (lambda c, r: quick_hits(c[1], r))
         hits = list(POOL.map(lambda c: fn(c[0] if isinstance(c, list) else c, req), crops))
         order.sort(key=lambda i: -hits[i])
         t_skim = time.perf_counter() - t0
     def first_calls(i):              # --lazy 1: only the first outline, except boxes whose skim showed both numbers
-        c = crops[i]
-        return c[0] if LAZY and isinstance(c, list) and hits[i] < EAGER_HITS else c
+        c = crops[i]                 # (8 Nov, --skim-name 1: or the requested name, when it picks out a few boxes)
+        if not (LAZY and isinstance(c, list)):
+            return c
+        if hits[i] < EAGER_HITS and not names[i]:
+            return c[0]
+        return c[:len(VARIANTS)] if ALT_LAZY else c
 
     if PREFETCH and ORDERED:         # --ordered-prefetch 1: every box's calls queued from here in skim order, so the
         for i in order:              # likely box is first in the OCR queue (with one prefetch per worker thread the 27
@@ -460,7 +544,9 @@ def read_all(frame, groups, req, t0):
         done.append((futs[f], d, time.perf_counter() - t0, reason))
         if d == MATCH and pick is None:
             if opts["--snap"] == "1":                  # the outline to draw is part of the PICK time
+                t_s = time.perf_counter()
                 SNAPPED[futs[f]] = snap_outline(frame, groups[futs[f]].box.poly)
+                STAGE["snap_s"] = time.perf_counter() - t_s
             pick = (futs[f], time.perf_counter() - t0)
     return pick, done, t_skim
 
@@ -470,12 +556,53 @@ import tightlib  # noqa: E402
 
 SNAP = dict(blur=1.5, end=0.02, lam=0.6, bias=-0.02)   # chosen on the dev photos only (det/snap_eval.py, round 3)
 SNAPPED = {}
+STAGE, _STAGE_LOCK = {}, threading.Lock()   # stage times of the last request (logged only, never used by a decision)
+
+
+REFINER = None
+if opts["--refine"] == "1":      # --snap 1 --refine 1: the learned edge refiner (det/train_refiner.py) instead of the snap
+    import refine_lib  # noqa: E402
+    REFINER = refine_lib.Refiner(os.path.join(os.path.dirname(H), "det", "weights", "refiner.pt"), opts["--refine-device"])
+    REFINER(np.zeros((64, 64, 3), np.uint8), np.array([[8, 8], [56, 8], [56, 20], [8, 20]], np.float64))   # warm-up
+# --draw-imgsz 1280 (6 Nov): the PICKed box is detected once more at 1280 px and that outline is refined and drawn
+# (chosen on the dev photos with the cross-validation nets: tight 18.5% from the 544 x 960 outlines, 24.2% from the
+# 1280 ones; 28-Sep test 19.4 -> 25.8%). Reading and the decision keep the 544 x 960 outlines.
+DET_DRAW = None
+if opts["--draw-imgsz"] != "0":
+    DET_DRAW = BoxDetector(weights, _m["task"], int(opts["--draw-imgsz"]), "0", _m["conf"], _m["iou"], cfg["classes"])
+    DET_DRAW.detect(np.zeros((640, 640, 3), np.uint8))
+
+
+def draw_poly(frame, poly):
+    """The 1280 px outline of the same box (highest IoU with the PICKed outline, at least 0.3), else the PICKed one."""
+    if DET_DRAW is None:
+        return poly
+    groups, _ = group_labels(DET_DRAW.detect(frame)[0], cfg["grouping"]["min_label_overlap"])
+    best = max(((tightlib.iou(np.asarray(g.box.poly, np.float32), np.asarray(poly, np.float32)), g.box.poly)
+                for g in drop_wide(groups)), default=(0.0, None), key=lambda t: t[0])
+    return best[1] if best[0] >= 0.3 else poly
 
 
 def snap_outline(frame, poly):
     """--snap 1: the PICKed box's outline, edge-corrected on the full photo (ends moved to the strongest edge, sides
-    drawn in by 2% of the width); the gradients are taken on a window around the box only. Drawing only: the reads and
-    the decision use the detector outline and its variants."""
+    drawn in by 2% of the width); the gradients are taken on a window around the box only. --refine 1: the edges are
+    placed by the learned refiner instead. Drawing only: the reads and the decision use the detector outline and its
+    variants."""
+    poly = draw_poly(frame, poly)
+    if WEBCAM_FRAME and opts["--refine-webcam"] == "0":
+        # 7 Nov: the refiner was trained and tested on phone photos only (owner outlines), never on webcam frames;
+        # on the Task 3 shelf stills it put the top end of K04 and K10 into the shelf bar. --refine-webcam 0: a webcam
+        # frame (Task 3, the recordings) gets the 1280 px outline as detected. Rule set after seeing K04 / K10.
+        return np.asarray(poly, np.float32)
+    if REFINER is not None:
+        return REFINER(frame, poly).astype(np.float32)
+    return gradient_snap(frame, poly)
+
+
+WEBCAM_FRAME = False
+
+
+def gradient_snap(frame, poly):
     p = np.asarray(poly, np.float32)
     pad = int(0.05 * np.ptp(p, axis=0).max()) + 16
     x0, y0 = np.maximum(np.floor(p.min(0)) - pad, 0).astype(int)
@@ -498,7 +625,11 @@ def request_once(name):
     return {"read_photo_s": t_read, "detect_s": t_det - t_read, "boxes": len(groups), "pick": pick, "skim_s": t_skim,
             "all_read_s": t_all, "matches": sorted(i for i, d, *_ in done if d == MATCH),
             # log for the evidence videos (taken after the clock stopped): when each box's read ended, and the outlines
-            "events": [[i, d, round(t, 4), why] for i, d, t, why in done], **outlines(groups, pick)}
+            "events": [[i, d, round(t, 4), why] for i, d, t, why in done], **outlines(groups, pick), **stages()}
+
+
+def stages():
+    return {"stages": {k: round(v, 4) if isinstance(v, float) else v for k, v in STAGE.items()}}
 
 
 def outlines(groups, pick):
@@ -514,8 +645,8 @@ def timing(name):
     picks = [r["pick"][1] for r in runs if r["pick"]]
     res = {"set": name, "request": SETS[name][1], "detector": weights, "imgsz": opts["--imgsz"], "workers": WORKERS,
            "prefetch": PREFETCH, "order": opts["--order"], "ocr_workers": opts["--ocr-workers"], "procs": PROCS, "proc_device": opts["--proc-device"],
-           "proc_threads": opts["--proc-threads"], "cls_cpu": opts["--cls-cpu"], "skim_procs": opts["--skim-procs"], "variants": len(VARIANTS), "lazy": LAZY, "snap": opts["--snap"], "barcode": opts["--barcode"], "ordered_prefetch": ORDERED, "eager_hits": EAGER_HITS, "priority": DISPATCH is not None,
-           "cache": dict(STATS),
+           "proc_threads": opts["--proc-threads"], "cls_cpu": opts["--cls-cpu"], "skim_procs": opts["--skim-procs"], "variants": len(VARIANTS), "views": opts["--views"], "alt_views": ALT_VIEWS, "skim_name": SKIM_NAME, "alt_lazy": ALT_LAZY, "lazy": LAZY, "snap": opts["--snap"], "refine": opts["--refine"], "refine_device": opts["--refine-device"], "draw_imgsz": opts["--draw-imgsz"], "barcode": opts["--barcode"], "ordered_prefetch": ORDERED, "eager_hits": EAGER_HITS, "priority": DISPATCH is not None,
+           "cache": dict(STATS), "ocr_variant": OCR_VARIANT,
            "runs": len(runs), "picked_box": [r["pick"][0] if r["pick"] else None for r in runs],
            "matches_each_run": [r["matches"] for r in runs],
            "pick_s_median": round(statistics.median(picks), 3) if picks else None,
@@ -580,6 +711,8 @@ def shelf_ids(groups):
 def task3(_name=None):
     """Every Task 3 request on its own photo: every box read for that request at once; PICK = first MATCH. Cells per
     request x box: requested box green = TP, requested box not green = FN, other box green = FP (wrong box), else TN."""
+    global WEBCAM_FRAME
+    WEBCAM_FRAME = True
     rows, cells = [], Counter()
     reqs = task3_requests()
     for k, r in enumerate([reqs[0]] + reqs):                   # the first request once more as warm-up, not counted
@@ -602,7 +735,7 @@ def task3(_name=None):
                "pick_box": ids[pick[0]] if pick else None, "pick_s": round(pick[1], 3) if pick else None,
                "detect_s": round(t_det, 3), "all_read_s": round(t_all, 3),
                "decisions": [[ids[i], d, why] for i, (d, why) in sorted(dec.items())],
-               "events": [[i, d, round(t, 4)] for i, d, t, _ in done], "ids": ids, **outlines(groups, pick)}
+               "events": [[i, d, round(t, 4)] for i, d, t, _ in done], "ids": ids, **outlines(groups, pick), **stages()}
         u_green = False
         for i, (d, _) in dec.items():
             if tgt in UNKNOWN and ids[i] == "U":                # only without --claude-slots             # one of the U slots is the target: truth per box unknown
@@ -620,8 +753,8 @@ def task3(_name=None):
     right = lambda x: x["pick_box"] == x["target"] or (x["target"] in UNKNOWN and x["pick_box"] == "U")  # noqa: E731
     green_t = [x["pick_s"] for x in live if x["pick_box"] and right(x)]
     res = {"detector": weights, "imgsz": opts["--imgsz"], "workers": WORKERS, "requests": len(rows),
-           "claude_slots": opts["--claude-slots"] == "1", "variants": len(VARIANTS), "procs": PROCS, "lazy": LAZY, "ordered_prefetch": ORDERED, "priority": DISPATCH is not None,
-           "on_shelf": len(live), "on_shelf_green_right_box": len(green_t),
+           "claude_slots": opts["--claude-slots"] == "1", "ocr_variant": OCR_VARIANT, "variants": len(VARIANTS), "views": opts["--views"], "alt_views": ALT_VIEWS, "skim_name": SKIM_NAME, "alt_lazy": ALT_LAZY, "procs": PROCS, "lazy": LAZY, "ordered_prefetch": ORDERED, "priority": DISPATCH is not None,
+           "snap": opts["--snap"], "refine": opts["--refine"], "on_shelf": len(live), "on_shelf_green_right_box": len(green_t),
            "wrong_box_green": sum(1 for x in rows for b in x["green_boxes"]
                                   if b != x["target"] and not (b == "U" and x["target"] in UNKNOWN)),
            "green_by_elimination": sum(1 for x in live if x["target"] in UNKNOWN and "U" in x["green_boxes"]),
@@ -632,6 +765,198 @@ def task3(_name=None):
            "pick_within_1s": sum(t <= 1 for t in green_t), "pick_within_2s": sum(t <= 2 for t in green_t),
            "all_read_s_median": round(statistics.median(x["all_read_s"] for x in rows), 3), "cells": dict(cells)}
     json.dump({"summary": res, "rows": rows}, open(os.path.join(OUT, "task3.json"), "w"), indent=1)
+    print(json.dumps(res), flush=True)
+
+
+def live(setdir):
+    """The live webcam runs replayed on the AI PC (6 Nov): set.json (made from a live run folder) lists each request
+    with the first camera still of its take. Box ids: the k-th detected box from the left is the k-th box of
+    order_left_to_right (the shelf order read by Claude from the owner's calibration photo, not checked by a person),
+    used only when exactly that many boxes are detected; else the photo is counted apart (count_mismatch) and none of
+    its boxes is scored. Cells per request x box as task3. Writes out/<tag>/live_<set>.json."""
+    global WEBCAM_FRAME
+    WEBCAM_FRAME = True
+    s = json.load(open(os.path.join(setdir, "set.json")))
+    order = s["order_left_to_right"]
+    rows, cells, mismatch = [], Counter(), []
+    reqs = s["requests"]
+    for k, r in enumerate([reqs[0]] + reqs):                   # the first request once more as warm-up
+        req = parse_request(r["request"])
+        _CACHE.clear()
+        t0 = time.perf_counter()
+        # 7 Nov: "photos" (the take's first camera stills, time order) are read one after another until one gives a
+        # PICK, as the laptop reads several seconds of video; each still is decided on its own (two sources on that
+        # still). The clock runs from the first still. Without "photos": the first still only, as before.
+        stills = r.get("photos") or [r["photo"]]
+        for j, name in enumerate(stills):
+            frame = cv2.imread(os.path.join(setdir, name))
+            groups = boxes(frame)
+            t_det = time.perf_counter() - t0
+            pick, done, _ = read_all(frame, groups, req, t0)
+            if pick or any(d == MATCH for _, d, _, _ in done):
+                break
+        still_used = j + 1
+        t_all = time.perf_counter() - t0
+        if k == 0:
+            continue
+        dec = {i: (d, why) for i, d, _, why in done}
+        xs = sorted(range(len(groups)), key=lambda i: float(groups[i].box.poly[:, 0].mean()))
+        ids = {i: order[j] for j, i in enumerate(xs)} if len(groups) == len(order) else {i: "?" for i in xs}
+        greens = sorted(i for i, (d, _) in dec.items() if d == MATCH)
+        if len(groups) != len(order):
+            mismatch.append(r["id"])
+        else:
+            for i, (d, _) in dec.items():
+                pos = ids[i] == r["target"]
+                cells[("TP" if d == MATCH else "FN") if pos else ("FP" if d == MATCH else "TN")] += 1
+        rows.append({"id": r["id"], "request": r["request"], "target": r["target"], "boxes": len(groups),
+                     "green_boxes": [ids[i] for i in greens], "pick_box": ids[pick[0]] if pick else None,
+                     "pick_s": round(pick[1], 3) if pick else None, "detect_s": round(t_det, 3),
+                     "all_read_s": round(t_all, 3), "decisions": [[ids[i], d, why] for i, (d, why) in sorted(dec.items())],
+                     "events": [[i, d, round(t, 4)] for i, d, t, _ in done], "ids": ids, **outlines(groups, pick),
+                     "stills_read": still_used, "stills": len(stills),
+                     **stages()})
+        print(r["id"], r["request"], "->", rows[-1]["pick_box"], rows[-1]["pick_s"], "greens", rows[-1]["green_boxes"],
+              flush=True)
+    green_t = [x["pick_s"] for x in rows if x["pick_box"] == x["target"]]
+    res = {"set": os.path.basename(os.path.normpath(setdir)), "source_run": s["source_run"], "detector": weights,
+           "imgsz": opts["--imgsz"], "ocr_variant": OCR_VARIANT, "variants": len(VARIANTS), "views": opts["--views"], "alt_views": ALT_VIEWS, "skim_name": SKIM_NAME, "alt_lazy": ALT_LAZY, "procs": PROCS,
+           "refine": opts["--refine"], "requests": len(rows), "slots": len(order), "green_right_box": len(green_t),
+           "wrong_box_green": sum(1 for x in rows for b in x["green_boxes"] if b not in (x["target"], "?")),
+           "green_count_mismatch_photo": sum(1 for x in rows for b in x["green_boxes"] if b == "?"),
+           "count_mismatch": mismatch,
+           "pick_s_median": round(statistics.median(green_t), 3) if green_t else None,
+           "pick_s_max": max(green_t) if green_t else None,
+           "pick_within_1s": sum(t <= 1 for t in green_t), "pick_within_2s": sum(t <= 2 for t in green_t),
+           "all_read_s_median": round(statistics.median(x["all_read_s"] for x in rows), 3), "cells": dict(cells)}
+    json.dump({"summary": res, "rows": rows}, open(os.path.join(OUT, f"live_{res['set']}.json"), "w"), indent=1)
+    print(json.dumps(res), flush=True)
+
+
+def filename_product(stem):
+    import re
+    from src.box_verifier import PRODUCTS
+    key = re.sub(r"[^a-z0-9]", "", stem.lower())
+    hits = [p for p in PRODUCTS if p.replace(" ", "") in key]
+    return max(hits, key=len) if hits else None
+
+
+DRIVE_OUTLINES = opts["--drive-outlines"] == "1"
+
+
+def discover_all(frame, g, i, req0):
+    """--drive-outlines 1 (8 Nov): the Drive discovery reads every outline the reader reads (4 variants, and with
+    --alt-views 1 the other view's 4), not only the first: identities = all read on any outline; two sources = an
+    identity the reader's own rule (full: one outline MATCH, none reading another identity) greens; size read = the
+    diameter AND length read, and the same on every outline that read one (outlines disagreeing = not read)."""
+    outl = variant_crops(frame, g) if len(VARIANTS) > 1 else [prepare_crops(frame, g, cfg)]
+    evs = [read_target_evidence(*c, reader(), cfg, req0, catalog, attempt=3, identity_verified=True)[0] for c in outl]
+    ids, sizes = set(), set()
+    for ev in evs:
+        t = ev.text
+        if t is not None and t.product_ok:
+            ids.add((t.product, t.diameter if t.diameter_ok else None, t.length if t.length_ok else None))
+        for r in ev.refs:
+            ids.add((r.product, r.diameter, r.length))
+        if t is not None and t.diameter_ok and t.length_ok:
+            sizes.add((t.diameter, t.length))
+    two = [x for x in ids if x[1] is not None and x[2] is not None and full(outl, Request(*x))[0] == MATCH]
+    return {"index": i, "identities": sorted(map(list, ids), key=str), "two_sources": sorted(map(list, two)),
+            "size_read": list(next(iter(sizes))) if len(sizes) == 1 else None, "size_disagree": len(sizes) > 1,
+            "outlines": len(outl), "spine": (evs[0].spine or "")[:160], "refs": sorted({r.text for ev in evs for r in ev.refs})}
+
+
+def drive(photo_dir):
+    """Leo's Drive product photos (6 Nov): one box per photo. 1) discovery, not timed: every box read once with the full
+    read (as results/drive_photos_20261029/photo_test.py), each identity its text or REF names re-decided with the
+    laptop's two-source rule; the chosen box = the leftmost two-source box of the photo's own product (file name), else
+    of any product. 2) the mentor's request for that box's identity, timed as `time` (cache cleared, final reader): PICK
+    and the drawn outline. A photo with no two-source box: what was read and why it cannot go green. The file name is
+    the photo's product (a proxy: photos may hold other products); the printed size of the chosen box is checked by
+    Claude from the photo, not by the owner. Writes out/<tag>/drive.json and out/<tag>/drive/<photo>.jpg."""
+    import glob
+    from src.box_evidence import redecide
+    os.makedirs(os.path.join(OUT, "drive"), exist_ok=True)
+    rows = []
+    for path in sorted(glob.glob(os.path.join(photo_dir, "*.jpg"))):
+        stem = os.path.splitext(os.path.basename(path))[0]
+        frame = cv2.imread(path)
+        expected = filename_product(stem)
+        groups = boxes(frame)
+        req0 = parse_request(f"{expected} 3 x 20") if expected and expected != "permanent sled bag" else parse_request("angiolite 3 x 20")
+
+        def discover(i):
+            if DRIVE_OUTLINES:
+                return discover_all(frame, groups[i], i, req0)
+            ev, *_ = read_target_evidence(*prepare_crops(frame, groups[i], cfg), reader(), cfg, req0, catalog, attempt=3,
+                                          identity_verified=True)
+            ids = set()
+            if ev.text is not None and ev.text.product_ok:
+                ids.add((ev.text.product, ev.text.diameter if ev.text.diameter_ok else None,
+                         ev.text.length if ev.text.length_ok else None))
+            for r in ev.refs:
+                ids.add((r.product, r.diameter, r.length))
+            two = [x for x in ids if x[1] is not None and x[2] is not None
+                   and redecide(ev, Request(*x), cfg, catalog)[0] == MATCH]
+            t = ev.text
+            # 7 Nov: the printed size read on this box (diameter AND length at full confidence), whatever the brand:
+            # "box read" for brands outside the catalogue too (the name cannot be checked there, the size can)
+            size = [t.diameter, t.length] if t is not None and t.diameter_ok and t.length_ok else None
+            return {"index": i, "identities": sorted(map(list, ids), key=str), "two_sources": sorted(map(list, two)),
+                    "size_read": size, "spine": (ev.spine or "")[:160], "refs": [r.text for r in ev.refs]}
+
+        _CACHE.clear()
+        found = list(POOL.map(discover, range(len(groups))))
+        xs = {i: float(groups[i].box.poly[:, 0].mean()) for i in range(len(groups))}
+        cands = sorted(((b["index"], tuple(x)) for b in found for x in b["two_sources"]), key=lambda c: xs[c[0]])
+        own = [c for c in cands if c[1][0] == expected]
+        chosen = (own or cands or [None])[0]
+        row = {"photo": os.path.basename(path), "product_from_name": expected, "boxes": len(groups),
+               "two_source_boxes": len({b["index"] for b in found if b["two_sources"]}),
+               "one_source_boxes": sum(1 for b in found if b["identities"] and not b["two_sources"]),
+               "nothing_read": sum(1 for b in found if not b["identities"]),
+               "size_read_boxes": sum(1 for b in found if b["size_read"]),
+               "size_disagree_boxes": sum(1 for b in found if b.get("size_disagree")), "drive_outlines": DRIVE_OUTLINES,
+               "chosen": None, "discovery": found}
+        vis = frame.copy()
+        tk = max(2, frame.shape[1] // 500)
+        if chosen:
+            i0, ident = chosen
+            text = f"{ident[0]} {ident[1]:g} x {ident[2]:g}"
+            req = parse_request(text)
+            _CACHE.clear()
+            SNAPPED.clear()
+            t0 = time.perf_counter()
+            frame2 = cv2.imread(path)
+            groups2 = boxes(frame2)
+            t_det = time.perf_counter() - t0
+            pick, done, _ = read_all(frame2, groups2, req, t0)
+            t_all = time.perf_counter() - t0
+            greens = sorted(i for i, d, *_ in done if d == MATCH)
+            row["chosen"] = {"box": i0, "request": text, "pick_box": pick[0] if pick else None,
+                             "pick_s": round(pick[1], 3) if pick else None, "greens": greens, "all_read_s": round(t_all, 3),
+                             "detect_s": round(t_det, 3), "events": [[i, d, round(t, 4)] for i, d, t, _ in done],
+                             "stages": dict(STAGE), **outlines(groups2, pick)}
+            if pick:
+                poly = SNAPPED.get(pick[0], groups2[pick[0]].box.poly)
+                cv2.polylines(vis, [np.rint(poly).astype(np.int32)], True, (60, 200, 0), tk, cv2.LINE_AA)
+            banner = f'"{text}" -> ' + (f"PICK in {pick[1]:.2f} s" if pick else "no box verified")
+        else:
+            best = max(found, key=lambda b: len(b["identities"]), default=None)
+            why = ("product not in the catalogue" if expected is None else "no box with two sources")
+            banner = f"{expected or stem}: {why}" + (f"; read: {best['identities'][0]}" if best and best["identities"] else "")
+        s = max(1.0, frame.shape[1] / 1200)
+        cv2.rectangle(vis, (0, 0), (frame.shape[1], int(48 * s)), (20, 20, 20), -1)
+        cv2.putText(vis, banner[:90], (int(10 * s), int(33 * s)), cv2.FONT_HERSHEY_SIMPLEX, 0.8 * s, (255, 255, 255),
+                    max(1, int(2 * s)))
+        cv2.imwrite(os.path.join(OUT, "drive", stem + ".jpg"), vis, [cv2.IMWRITE_JPEG_QUALITY, 88])
+        rows.append(row)
+        print(stem, expected, len(groups), "two-source boxes", row["two_source_boxes"], "->",
+              (row["chosen"] or {}).get("request"), (row["chosen"] or {}).get("pick_s"), flush=True)
+    res = {"photos": len(rows), "with_green": sum(1 for r in rows if r["chosen"] and r["chosen"]["pick_box"] is not None),
+           "catalog_product_photos": sum(1 for r in rows if r["product_from_name"]), "ocr_variant": OCR_VARIANT,
+           "refine": opts["--refine"]}
+    json.dump({"summary": res, "rows": rows}, open(os.path.join(OUT, "drive.json"), "w"), indent=1, default=str)
     print(json.dumps(res), flush=True)
 
 
@@ -646,8 +971,9 @@ def demo(name, photo=None, text=None):
     pick, done, _ = read_all(frame, groups, req, time.perf_counter())
     vis = frame.copy()
     t = max(3, frame.shape[1] // 400)
-    for g in groups:
-        cv2.polylines(vis, [np.rint(g.box.poly).astype(np.int32)], True, (150, 150, 150), max(1, t // 3))
+    if os.environ.get("AIPC_DEMO_ALL") == "1":         # 6 Nov (owner): only the green box is shown by default
+        for g in groups:
+            cv2.polylines(vis, [np.rint(g.box.poly).astype(np.int32)], True, (150, 150, 150), max(1, t // 3))
     if pick:
         poly = SNAPPED.get(pick[0], groups[pick[0]].box.poly)
         cv2.polylines(vis, [np.rint(poly).astype(np.int32)], True, (60, 200, 0), t)
@@ -657,6 +983,21 @@ def demo(name, photo=None, text=None):
     cv2.putText(vis, label, (int(14 * s), int(40 * s)), cv2.FONT_HERSHEY_SIMPLEX, 1.0 * s, (255, 255, 255), max(2, int(2 * s)))
     out = os.path.join(OUT, f"{name}_demo.jpg")
     cv2.imwrite(out, vis, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    if pick:                                           # zooms of the PICKed box: both ends and the middle
+        d = groups[pick[0]].box.poly
+        cols = [(d, (40, 40, 230)), (gradient_snap(frame, d), (230, 120, 20))]
+        if REFINER is not None:
+            cols.append((REFINER(frame, d), (220, 40, 220)))
+        z = frame.copy()
+        for poly, col in cols:
+            cv2.polylines(z, [np.rint(poly).astype(np.int32)], True, col, max(1, frame.shape[1] // 1500), cv2.LINE_AA)
+        c, u, v, L, W = tightlib.frame_of(np.asarray(d, np.float64))
+        tiles = []
+        for f in (-1.0, 0.0, 1.0):
+            pt, r = c + f * L * u, int(1.6 * W)
+            x0, y0 = int(max(0, pt[0] - r)), int(max(0, pt[1] - r))
+            tiles.append(cv2.resize(z[y0:y0 + 2 * r, x0:x0 + 2 * r], (400, 400), interpolation=cv2.INTER_AREA))
+        cv2.imwrite(os.path.join(OUT, f"{name}_zoom.jpg"), np.hstack(tiles), [cv2.IMWRITE_JPEG_QUALITY, 90])
     print(out, "pick", pick, "matches", sorted(i for i, d, *_ in done if d == MATCH), flush=True)
 
 
@@ -664,12 +1005,25 @@ def main():
     mode, names = args[0], args[1:] or ["t1_drive", "t2_drive"]
     if mode == "task3":
         task3()
+    elif mode == "live":
+        for d in args[1:]:
+            live(d)
+    elif mode == "demo_drive":                         # demo_drive DRIVE_JSON: the chosen request of each Drive photo
+        d = json.load(open(args[1]))
+        base = os.path.join(C, "results/drive_photos_20261029/src_photos/main")
+        for r in d["rows"]:
+            if r["chosen"]:
+                demo(os.path.splitext(r["photo"])[0], os.path.join(base, r["photo"]), r["chosen"]["request"])
+    elif mode == "drive":
+        drive(args[1] if len(args) > 1 else os.path.join(C, "results/drive_photos_20261029/src_photos/main"))
     elif mode == "demo":
         for n in names:
             if n.startswith("task3:"):                         # task3:K07 -> that request on its own shelf photo
                 r = next(x for x in task3_requests() if x["id"] == n.split(":")[1])
+                WEBCAM_FRAME = True
                 demo(n.replace(":", "_"), r["photo"], r["request"])
             else:
+                WEBCAM_FRAME = False
                 demo(n)
     else:
         for n in names:

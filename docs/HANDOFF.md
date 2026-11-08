@@ -2,6 +2,76 @@
 
 Newest entry first. One entry per finished piece of work: date, who, what changed, how it was tested, what is open.
 
+## 2026-11-08 - Claude Code: fail cases fixed first, tilted boxes, then speed (aipc/README.md "8 Nov")
+
+* Owner asked: fix the fail cases, find the tilted / missed boxes with the best model, aim at 98% of boxes read,
+  accurate and precise, then speed (< 2 s). All of it is AI PC only (`aipc/tasks`, `aipc/det`); laptop `src/` and
+  configs unchanged; 661 tests passed.
+* Tilted boxes: model B was trained at 1280 but ran at 544x960. `det/det_probe.py` on the 28-Sep photos turned 0/20/35
+  degrees: B 544x960 94.7/93.9/92.3% recall, B 1280 98.2/98.8/98.5% (seen = upper bound); held-out YOLO26s / YOLO12s lose
+  2.8 / 3.6 points at 35 degrees at 544x960 and none at 1280. 1280 alone misses packed white Orsiro boxes, so the final
+  detector is `--views "B:1280:0+B:544x960:0"` (ordered merge, `multiview.py`). Leo's Drive photos: 851 -> 936 boxes;
+  Claude's visual count of all 39 photos: ~14 visible boxes without an outline, ~98% found (not owner truth).
+* Reading: `--split-sizes 1`, `--spine-size 1` (`size_split.py`), `--alt-views 1` (each box also read from the other
+  view's outline, 4 variants each). Asked box green T1 / T2 / WA / T3: 6/17/2/9 (34) -> 7/24/7/11 = 49 of 60, wrong 0,
+  absent 0 (`rd_altb`, `rd_altz`, `rd_zh`). `--alt-views` was designed after seeing the T1/T2 per-box reads (chosen on
+  the test photos; disclosed in the deck). `--refine-webcam 0`: K04/K10 tops no longer run into the shelf bar.
+* Speed (accuracy unchanged in the accuracy runs): `--alt-lazy 1`, `--skim-name 1`, OCR processes `OCR_ALGO=HEURISTIC`
+  (aipc_tasks `--algo` only reached the main process). Quiet GPU, CPU load 30-60 from other users (`fq8_load.log`):
+  T1 1.36 s, WA 1.15 s, T2 1.60 s, T3 median 1.99 s (6 of 11 greens < 2 s), Accuforce 3.5-3.9 s (`fqzh*`).
+  Recordings, 5 stills per take: 13 / 4 / 4 green (laptop 12 / 4 / 3), median 1.7 / 3.0 / 5.9 s, wrong 0.
+  Drive (`--drive-outlines 1`, discovery on every outline): size read 420 of 936 boxes, two sources 141, 8 of 14
+  catalogue photos green + the demo samples carton, 9/9 right box (Claude check). The earlier deck called the demo
+  samples photo sweets: wrong, it is a carton of ~20 stent / balloon boxes.
+* Runs: `acc_chain.sh`, `alt_chain.sh`, then `queue_runner.sh` with `queue/*.job` (one GPU run at a time, time limit
+  each). On 7 Nov a Drive run waited 18 h: started while the detector probe used the GPU, an OCR worker failed to get
+  memory, the pool broke. `ocr_worker.py` now logs the onnxruntime message and retries once at 0.75 scale; the errors
+  are BFCArena out-of-memory on the shared card (Drive runs still 70-80 per run, most retried OK).
+* OPEN: Accuforce 3.5-3.9 s and 1 s target (one batched OCR process); owner relabel of Leo's 39 photos (936 pre-drawn
+  outlines) for 98% on new photos and packed boxes; 11 held boxes need a second frame / closer photo; laptop adoption
+  of the 8 Nov options is the owner's decision. A third view (YOLO12s hold at 1600) reads more Drive sizes (499 vs 420)
+  and finds the Elutax boxes, same task cells, but Task 3 median 2.08 s (3 of 11 < 2 s; `fqv3h*`): kept as an option.
+* Deck Version 20, 40 slides (new: tilted boxes, fail-case fixes).
+
+## 2026-11-07 - Claude Code: final AI PC reader, recordings, Leo's Drive photos, OCR engines, YOLOv8/12 (aipc/README.md)
+
+* Final reader adds `--draw-imgsz 1280`: the PICKed box is detected again at 1280 px and refined for the drawn outline
+  only (0.02-0.20 s, decisions unchanged). Held-out tight 19.4 -> 25.8%. Quiet GPU (`tasks/final_quiet.sh`): Task 1
+  1.18 s (max 1.33), WhatsApp copy no box (1.67 s), Task 2 1.55 s (max 1.96), Task 3 9/0/0, median 1.96 s, 5 of 9
+  under 2 s. Slower than 5 Nov (1.07 / 1.25 / 1.6 s) because of the outline; stated in the deck.
+* OPEN: Task 3 outline tops of K04 and K10 run into the shelf bar (refiner never trained on webcam stills). Needs
+  owner outlines of ~10 shelf stills.
+* Recordings replayed on the AI PC (first still per take, ids read by Claude): 20 boxes 12 green / 0 wrong (median
+  1.94 s), 12 boxes 3 / 0, close camera 0 / 0. Laptop live: 12, 4, 3. OPEN: replay 3-5 frames per take.
+* Leo's Drive folder (`aipc_tasks.py drive`): 39 photos, 6 green (Chroma, SeQuent Please NEO, Essential Pro,
+  Angiolite, Ryurei, Xperience Pro), each the asked size, checked by Claude (not a person). Elutax: no box found.
+  8 catalogue photos reach one source only and stay held.
+* OCR engines (`tasks/ocr_gpu.sh`, `ocr_table.py`): PP-OCRv6 small kept (T1 6, T2 17, WA 2, T3 9; PICK 1.24 / 1.48 s).
+  PP-OCRv5 server + English reader 7 / 20 / 2 / 8 but 2x slower to read all; EasyOCR and Tesseract ~0. No engine gave
+  a wrong green. The v5 server reader's Task 2 timing run hung 12 h (dead worker, "cannot schedule new futures after
+  shutdown") and was stopped by PID.
+* Detectors YOLOv8s/m and YOLO12s/m (holdout, `det/queue5.sh`, `tasks/det_tasks.sh`): held-out recall 89.6 / 90.8 /
+  89.2 / 84.6%, none beats YOLO26s. Task photos (T1 · T2 · WA · T3, 0 FP): v8s 1·11·1·8, 12s 6·23·4·9, v8m 5·3·1·11,
+  12m 3·14·2·8. YOLO12s is the best held-out candidate there (YOLO26s 6·20·4·9) but choosing on them is choosing on
+  the test; model B kept. OPEN: retrain YOLO12s on all 196 photos and test on new photos.
+* Evidence videos re-rendered green-only with a full-resolution zoom. Deck 38 slides.
+
+## 2026-11-06 - Claude Code: learned edge refiner, stage times, product and fail-case lists (aipc/README.md)
+
+* Edge refiner (`aipc/det/refine_lib.py`): small CNN on full-resolution strips across each end of the detected rectangle;
+  sides by a constant (a side net could not find the sides of touching boxes). Trained on the owner outlines of the 109
+  dev photos only. Set-up chosen 3 times, all reported: on 16 validation photos twice (test 20.2% then 12.4% tight:
+  noise), then 5-fold CV on all dev (`cv_refine.py`: CV 18.5%, test 19.4%). 28-Sep test, pipeline outlines (model B
+  544x960, SEEN): tight 14.0 -> 19.4%, 2%/10% 39.9 -> 52.9%, ends short 48.8 -> 29.9%, ends past 27.2 -> 22.7%, sides past
+  58.4 -> 51.9%, sides short 20.4 -> 26.2%; held-out YOLO26s 4.1 -> 10.6%.
+* In the reader: `--refine 1 --refine-device cuda` (drawing only, decisions unchanged: Task 3 9/0/0, same PICK boxes);
+  12-28 ms; interleaved A/B (`tasks/refine_ab.sh`): PICK Task 1 0.952 -> 0.950 s, Task 2 1.162 -> 1.151 s.
+* OPEN: the refiner never saw webcam stills (no owner outlines). By eye on 5 Task 3 PICK zooms: bottom ends better on
+  all, top end past the box on K04 and K10. Needs owner outlines of ~10 shelf stills to test and train there.
+* Stage times (`tasks/stages.sh`, quiet GPU, logged only): detect ~10 ms, crops 17-122 ms, skim 0.24-0.44 s, PICK
+  Task 1 0.96 s (0.80-1.08), Task 2 1.13 s, Task 3 median 1.67 s; detection + crops 1-4% of the time, OCR ~90%.
+* Deck (31 slides): products slide (7 brands, 13 lines), stage times, refiner + zooms, every held box by name.
+
 ## 2026-11-05 - Claude Code: AI PC reader fixes, video evidence, a gap in the two-source rule (aipc/README.md)
 
 * OPEN, OWNER, SAFETY: a GTIN source (barcode or the GTIN text read by OCR) is compared with the request on product and

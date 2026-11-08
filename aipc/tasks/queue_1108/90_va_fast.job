@@ -1,0 +1,17 @@
+# 8 Nov: 544x960 first (its outlines read first, as 7 Nov), 1280 adds missed boxes, the 1280 outline of a box read only
+# when the 544 outlines give no MATCH and no conflict (--alt-lazy 1), order by name too (--skim-name 1). Accuracy, then
+# timing on a quiet GPU.
+run rd_altaz 900 score t1_drive t2_drive t1_orig --imgsz 544x960 $F --views $VA --alt-views 1 --alt-lazy 1 --skim-name 1 $R --procs 20
+run rd_altaz_t3 1500 task3 --imgsz 544x960 $F --views $VA --alt-views 1 --alt-lazy 1 --skim-name 1 $R --procs 20 --claude-slots 1
+quiet=0
+while [ $quiet -lt 6 ]; do
+  u=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | tr -d " ")
+  if [ "$u" -lt 30 ]; then quiet=$((quiet+1)); else quiet=0; fi
+  sleep 10
+done
+echo "GPU quiet $(date +%T) load $(cut -d' ' -f1-3 /proc/loadavg)"
+FA="--imgsz 544x960 --workers 27 --cls-cpu 1 --proc-threads 1 --order skim --snap 1 --refine 1 --refine-device cuda --draw-imgsz 1280 --variants 1 --lazy 1 --ordered-prefetch 1 --priority 1 --views $VA --alt-views 1 --alt-lazy 1 --skim-name 1 $R --refine-webcam 0"
+run fq8a 2400 time t1_drive t1_orig t2_drive --runs 5 $FA --procs 24
+run fq8a_t3 2400 task3 $FA --procs 20 --claude-slots 1
+run fq8a_live 3600 live $S $FA --procs 20
+run fq8a_drive 2400 drive $FA --drive-outlines 1 --procs 20

@@ -1,0 +1,30 @@
+# final timing (8 Nov) on a quiet GPU, final config: 1280 first + 544 adds, both outlines read, joined sizes split, size
+# from the spine, PICKed box drawn from 1280 + refiner (not on webcam frames: --refine-webcam 0, K04 / K10). Then the
+# same with --skim-name 1 (order by the product name too; speed only). GPU load logged.
+quiet=0
+while [ $quiet -lt 6 ]; do
+  u=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | tr -d " ")
+  if [ "$u" -lt 30 ]; then quiet=$((quiet+1)); else quiet=0; fi
+  sleep 10
+done
+echo "GPU quiet $(date +%T)"
+(while true; do echo $(date +%T) $(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader) $(nvidia-smi --query-compute-apps=pid --format=csv,noheader | grep -c .); sleep 5; done) > fq8_gpu.log 2>&1 &
+GL=$!
+FT="--imgsz 544x960 --workers 27 --cls-cpu 1 --proc-threads 1 --order skim --snap 1 --refine 1 --refine-device cuda --draw-imgsz 1280 --variants 1 --lazy 1 --ordered-prefetch 1 --priority 1 --views $VB --alt-views 1 $R --refine-webcam 0"
+run fq8 2400 time t1_drive t1_orig t2_drive --runs 5 $FT --procs 24
+run fq8_t3 2400 task3 $FT --procs 20 --claude-slots 1
+run fq8n 2400 time t1_drive t1_orig t2_drive --runs 5 $FT --skim-name 1 --procs 24
+run fq8n_t3 2400 task3 $FT --skim-name 1 --procs 20 --claude-slots 1
+run fq8_live 3600 live $S $FT --procs 20
+run fq8n_live 3600 live $S $FT --skim-name 1 --procs 20
+run fq8_drive 2400 drive $FT --drive-outlines 1 --procs 20
+run fq8z 2400 time t1_drive t1_orig t2_drive --runs 5 $FT --skim-name 1 --alt-lazy 1 --procs 24
+run fq8z_t3 2400 task3 $FT --skim-name 1 --alt-lazy 1 --procs 20 --claude-slots 1
+run fq8z_live 3600 live $S $FT --skim-name 1 --alt-lazy 1 --procs 20
+run fq8z_drive 2400 drive $FT --skim-name 1 --alt-lazy 1 --drive-outlines 1 --procs 20
+V3="B:1280:0+B:544x960:0+../det/runs/yolo12s-obb_1280_hold/weights/last.pt:1600:0"
+F3="$(echo $FT | sed "s|--views [^ ]*|--views $V3|")"
+run fq8v3 2400 time t1_drive t1_orig t2_drive --runs 5 $F3 --skim-name 1 --alt-lazy 1 --procs 24
+run fq8v3_t3 2400 task3 $F3 --skim-name 1 --alt-lazy 1 --procs 20 --claude-slots 1
+kill $GL
+run fq8_demo 2400 demo t1_drive t1_orig t2_drive task3:K01 task3:K04 task3:K07 task3:K10 task3:K21 $FT --procs 20

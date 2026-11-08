@@ -1,0 +1,7 @@
+# alt_chain.sh reached its Drive baseline: stop it there, so the decisive runs go first (its Drive and recording
+# baselines are queued below instead)
+for p in $(pgrep -f "bash alt_chain.sh"); do kill $p; done
+sleep 1
+for p in $(pgrep -f -- "--tag dr_base"); do kill $p; done
+sleep 5
+echo "alt_chain stopped before its Drive run: $(date +%T)"

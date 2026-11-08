@@ -1,0 +1,3 @@
+# baselines: Leo's Drive photos and the recordings (5 stills per take), detector 544x960 alone, no reading options
+run dr_base 5400 drive --imgsz 544x960 $F --procs 16
+run lm_base 3600 live $S --imgsz 544x960 $F --procs 20
