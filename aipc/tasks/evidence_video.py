@@ -11,8 +11,11 @@ run 4x slower. Colours: thin grey = detected, yellow = being read, grey = anothe
 needs confirmation, green = MATCH (PICK). --task3: one clip per Task 3 request (real speed + 1 s hold), all 41 in a row.
 6 Nov (owner): only the green box is drawn, the others are left out (--all-colours = the earlier look), and once the
 PICK is made a zoom of the green box at the photo's full resolution is shown on the right, so its edges can be checked.
-The WhatsApp copy of the Task 1 photo is titled Task 1. --live: the replayed live runs (aipc_tasks.py live).
+The mentor's Task 1 photo (t1_orig) is titled "Task 1 (mentor's photo)" (owner, 9 Nov: no separate
+WhatsApp name). --live: the replayed live runs (aipc_tasks.py live).
 --drive: Leo's Drive photos (aipc_tasks.py drive), one clip per photo with a green box, all in a row.
+8 Nov, night (owner): a run made with --pick-crops 1 also logs the crops cut from the PICKed box (pick_parts.py); from
+the PICK on, a strip under the photo shows them: BRAND | DETAIL (size + REF) | BARCODE (located, not decoded).
 """
 import json
 import pathlib
@@ -31,7 +34,71 @@ PHOTOS = {"t1_drive": "results/drive_photos_20261029/src_photos/main/DCB_BBraun_
 FPS, W, BAR = 30, 1280, 96
 GREY, YELLOW, BLUE, GREEN = (150, 150, 150), (0, 220, 255), (220, 120, 20), (60, 200, 0)
 ALL = "--all-colours" in sys.argv
-TITLE = {"t1_drive": "Task 1 (Drive photo)", "t1_orig": "Task 1 (WhatsApp copy)", "t2_drive": "Task 2 (Drive photo)"}
+TITLE = {"t1_drive": "Task 1 (Drive photo)", "t1_orig": "Task 1 (mentor's photo)", "t2_drive": "Task 2 (Drive photo)"}
+
+
+STRIP_H = 250
+FONT, AA = cv2.FONT_HERSHEY_SIMPLEX, cv2.LINE_AA
+
+
+def plain(s):
+    """Text as OpenCV can draw it (ASCII): "SeQuent(R)" for "SeQuent®"."""
+    return (s or "").replace("®", "(R)").replace("™", "(TM)").encode("ascii", "ignore").decode()
+
+
+def crop_tile(base, info, key, title, text, tw, th, u, bg):
+    """One tile of the crops strip: title, the crop (scaled to fit, green frame), what was read under it."""
+    out = np.full((th, tw, 3), bg, np.uint8)
+    cv2.putText(out, title, (int(14 * u), int(30 * u)), FONT, 0.62 * u, (200, 200, 200), max(1, int(1.5 * u)), AA)
+    f = info.get("files", {}).get(key)
+    img = cv2.imread(str(base / info["dir"] / f)) if f else None
+    bw, bh = tw - int(28 * u), th - int(88 * u)
+    if img is not None and img.size:
+        if key == "barcode" and img.shape[1] > 3 * img.shape[0]:      # a thin bars-only strip shown taller (laptop panel)
+            img = cv2.resize(img, (img.shape[1], max(1, img.shape[1] // 3)), interpolation=cv2.INTER_LINEAR)
+        s = min(bw / img.shape[1], bh / img.shape[0])
+        img = cv2.resize(img, (max(1, int(img.shape[1] * s)), max(1, int(img.shape[0] * s))),
+                         interpolation=cv2.INTER_CUBIC if s > 1 else cv2.INTER_AREA)
+        y, x = int(44 * u) + (bh - img.shape[0]) // 2, int(14 * u) + (bw - img.shape[1]) // 2
+        out[y:y + img.shape[0], x:x + img.shape[1]] = img
+        cv2.rectangle(out, (x - 2, y - 2), (x + img.shape[1] + 1, y + img.shape[0] + 1), GREEN, max(1, int(2 * u)))
+    put_fit(out, plain(text), (int(14 * u), th - int(16 * u)), tw - int(28 * u), 0.62 * u, (255, 255, 255),
+            max(1, int(1.5 * u)))
+    return out
+
+
+def put_fit(img, text, org, width, scale, colour, thick):
+    """Text in one line no wider than `width`: the font made smaller down to 60 %, then cut with "..."."""
+    k = scale
+    while k > 0.6 * scale and cv2.getTextSize(text, FONT, k, thick)[0][0] > width:
+        k *= 0.95
+    while len(text) > 4 and cv2.getTextSize(text, FONT, k, thick)[0][0] > width:
+        text = text[:-4] + "..."
+    cv2.putText(img, text, org, FONT, k, colour, thick, AA)
+
+
+def crops_strip(base, info, width, bg=(29, 30, 34), stacked=False):
+    """The PICK's crops (aipc_tasks.py --pick-crops 1, pick_parts.py) as three tiles, BRAND | DETAIL | BARCODE, each
+    with what was read under it. info = the log's "crops" (None: the strip says no box was cut); base = the folder of
+    the run log. Sizes for a 1280 px wide strip, scaled to `width`; stacked: the three tiles one under the other, each
+    as wide as the strip (under a portrait photo)."""
+    u = width / 1280
+    if not info:
+        out = np.full((int(STRIP_H * u), width, 3), bg, np.uint8)
+        cv2.putText(out, "no PICK: no box cut", (int(16 * u), int(40 * u)), FONT, 0.7 * u, (170, 170, 170),
+                    max(1, int(2 * u)), AA)
+        return out
+    files = info.get("files", {})
+    bars = info.get("barcode_bars") or 0
+    tiles = (("brand", "BRAND (as the OCR read it)", info.get("brand_text") or "not read"),
+             ("detail", "DETAIL: size, REF, GTIN text (OCR)", info.get("detail_text") or "not read"),
+             ("barcode", "BARCODE: located, not decoded", f"bars only, {bars} bars" if files.get("barcode") else "not found"))
+    if stacked:
+        u = width / 426                                  # a tile as wide as one third of a 1280 px strip, scaled up
+        return np.vstack([crop_tile(base, info, *t, width, int(180 * u), u, bg) for t in tiles])
+    tw = width // 3
+    out = np.hstack([crop_tile(base, info, *t, tw, int(STRIP_H * u), u, bg) for t in tiles])
+    return cv2.copyMakeBorder(out, 0, 0, 0, width - out.shape[1], cv2.BORDER_CONSTANT, value=bg)
 
 
 def colour(d):
@@ -71,11 +138,13 @@ class Writer:
         self.p.wait()
 
 
-def frames(photo, run, text, slow, hold, label=""):
-    """Yield the frames of one run: run = {"events", "polys", "pick_poly", "detect_s", "read_photo_s", "skim_s"}."""
+def frames(photo, run, text, slow, hold, label="", cdir=None):
+    """Yield the frames of one run: run = {"events", "polys", "pick_poly", "detect_s", "read_photo_s", "skim_s"}.
+    cdir (a run made with --pick-crops 1): the folder of its log; the crops strip goes under the photo."""
     s = W / photo.shape[1]
     base = cv2.resize(photo, (W, int(photo.shape[0] * s)), interpolation=cv2.INTER_AREA)
-    h = base.shape[0] + BAR
+    strip = crops_strip(cdir, run.get("crops"), W) if cdir is not None else None
+    h = base.shape[0] + BAR + (strip.shape[0] if strip is not None else 0)
     h += h % 2
     polys = [np.rint(np.array(p) * s).astype(np.int32) + [0, BAR] for p in run["polys"]]
     pick_poly = np.rint(np.array(run["pick_poly"]) * s).astype(np.int32) + [0, BAR] if run.get("pick_poly") else None
@@ -84,7 +153,14 @@ def frames(photo, run, text, slow, hold, label=""):
     t_skim = run.get("skim_s") or t_det
     t_end = max([t for _, t in ends.values()] + [t_det])
     pick = min(((t, i) for i, (d, t) in ends.items() if d == "match"), default=None)
-    inset = zoom(photo, run["pick_poly"] if run.get("pick_poly") else run["polys"][pick[1]], h - BAR) if pick else None
+    # 8 Nov: the PICK at the time the run logged it (the read's MATCH plus drawing its outline, as in the deck's times)
+    ps = run.get("pick_s") or (run["pick"][1] if run.get("pick") else None)
+    if pick and ps:
+        pick = (max(pick[0], ps), pick[1])
+    inset = zoom(photo, run["pick_poly"] if run.get("pick_poly") else run["polys"][pick[1]], base.shape[0]) if pick else None
+    # 8 Nov: the zoom goes on the side away from the green box, so it never covers it (portrait photos)
+    gx = float(np.mean((pick_poly if pick_poly is not None else polys[pick[1]])[:, 0])) if pick else W
+    inset_x = 0 if gx > W / 2 else (W - inset.shape[1] if inset is not None else 0)
     n = int((t_end * slow + hold) * FPS) + 1
     for k in range(n):
         t = min(k / FPS / slow, t_end)
@@ -120,9 +196,16 @@ def frames(photo, run, text, slow, hold, label=""):
         elif t >= t_end:
             status = "no box verified: every box held or another identity"
         if inset is not None and t >= pick[0]:
-            img[BAR:BAR + inset.shape[0], W - inset.shape[1]:] = inset
+            img[BAR:BAR + inset.shape[0], inset_x:inset_x + inset.shape[1]] = inset
+        if strip is not None:
+            y = BAR + base.shape[0]
+            if (pick and t >= pick[0]) or (not pick and t >= t_end):
+                img[y:y + strip.shape[0]] = strip
+            else:
+                cv2.putText(img, "brand / detail / barcode: cut from the box when it is PICKed", (16, y + 40),
+                            FONT, 0.7, (150, 150, 150), 2, AA)
         cv2.rectangle(img, (0, 0), (W, BAR), (29, 30, 34), -1)
-        cv2.putText(img, f"{text}", (16, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+        put_fit(img, plain(text), (16, 36), W - 380, 0.9, (255, 255, 255), 2)   # never under the clock (8 Nov)
         cv2.putText(img, f"t = {t:5.2f} s {label}", (W - 330, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.85,
                     (255, 255, 255) if slow == 1 else (0, 220, 255), 2)
         cv2.putText(img, status, (16, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.75,
@@ -141,7 +224,7 @@ def zoom(photo, poly, height):
     cv2.polylines(c, [np.rint(q - [x0, y0]).astype(np.int32)], True, GREEN, k, cv2.LINE_AA)
     f = min(height / c.shape[0], 0.4 * W / c.shape[1])
     z = cv2.resize(c, (max(1, int(c.shape[1] * f)), max(1, int(c.shape[0] * f))), interpolation=cv2.INTER_AREA)
-    return cv2.copyMakeBorder(z, 0, 0, 4, 0, cv2.BORDER_CONSTANT, value=(29, 30, 34))
+    return cv2.copyMakeBorder(z, 0, 0, 4, 4, cv2.BORDER_CONSTANT, value=(29, 30, 34))
 
 
 def median_run(d):
@@ -155,11 +238,12 @@ def task_video(out, tj):
     run = median_run(d)
     photo = cv2.imread(str(ROOT / PHOTOS[d["set"]]))
     text = f"{TITLE.get(d['set'], d['set'])}: {d['request']}"
-    first = next(frames(photo, run, text, 1, 0))
+    cdir = pathlib.Path(tj).parent if run.get("crops") else None
+    first = next(frames(photo, run, text, 1, 0, cdir=cdir))
     w = Writer(out / f"{d['set']}_run.mp4", first.shape[0])
     last = None
     for slow, label in ((1, "(real speed)"), (4, "(4x slower)")):
-        for img in frames(photo, run, text, slow, 2.0, label):
+        for img in frames(photo, run, text, slow, 2.0, label, cdir):
             w.put(img)
             last = img
     w.close()
@@ -170,15 +254,21 @@ def task_video(out, tj):
 def task3_video(out, tj, photos, name="task3_run.mp4"):
     d = json.load(open(tj, encoding="utf-8"))
     w = None
+    cdir = pathlib.Path(tj).parent if any(r.get("crops") for r in d["rows"]) else None
     for r in d["rows"]:
-        photo = cv2.imread(photos[r["id"]])
+        # 8 Nov: a set with several stills per request (*_multi) is read still after still until one gives a PICK; the
+        # log's outlines and decisions are those of the still read last, so that still is shown (the clock still runs
+        # from the first still)
+        p = photos[r["id"]]
+        photo = cv2.imread(p[r.get("stills_read", 1) - 1] if isinstance(p, list) else p)
         run = {"events": r["events"], "polys": r["polys"], "pick_poly": r.get("pick_poly"), "read_photo_s": 0.0,
-               "detect_s": r["detect_s"], "skim_s": None}
+               "detect_s": r["detect_s"], "skim_s": None, "pick_s": r.get("pick_s"), "crops": r.get("crops")}
         truth = "on the shelf" if r["target"] else "not on the shelf"
         title = {"box20": "Live, 20 boxes", "box12": "Live, 12 boxes", "box10close": "Live, close"}.get(
-            d["summary"].get("set"), "Task 3")
-        text = f"{title} {r['id']}  \"{r['request']}\"  ({truth})"
-        for img in frames(photo, run, text, 1, 1.0):
+            d["summary"].get("set", "").replace("_multi", ""), "Task 3")
+        still = f", still {r['stills_read']} of {r['stills']}" if r.get("stills", 1) > 1 else ""
+        text = f"{title} {r['id']}  \"{r['request']}\"  ({truth}{still})"
+        for img in frames(photo, run, text, 1, 1.0, cdir=cdir):
             if w is None:
                 w = Writer(out / name, img.shape[0])
             w.put(img)
@@ -205,7 +295,8 @@ if __name__ == "__main__":
         lj, sd = args[k + 1], pathlib.Path(args[k + 2])
         del args[k:k + 3]
         sj = json.load(open(sd / "set.json", encoding="utf-8"))
-        task3_video(out, lj, {r["id"]: str(sd / r["photo"]) for r in sj["requests"]}, f"live_{sd.name}_run.mp4")
+        task3_video(out, lj, {r["id"]: [str(sd / p) for p in (r.get("photos") or [r["photo"]])] for r in sj["requests"]},
+                    f"live_{sd.name}_run.mp4")
     if "--drive" in args:
         k = args.index("--drive")
         dj, pd = args[k + 1], pathlib.Path(args[k + 2])
@@ -217,8 +308,10 @@ if __name__ == "__main__":
             if not c or c["pick_box"] is None:
                 continue
             run = {"events": c["events"], "polys": c["polys"], "pick_poly": c.get("pick_poly"), "read_photo_s": 0.0,
-                   "detect_s": c["detect_s"], "skim_s": None}
-            for img in frames(cv2.imread(str(pd / r["photo"])), run, f"Drive {r['photo'][:-4]}: \"{c['request']}\"", 1, 1.5):
+                   "detect_s": c["detect_s"], "skim_s": None, "pick_s": c.get("pick_s"), "crops": c.get("crops")}
+            cdir = pathlib.Path(dj).parent if c.get("crops") else None
+            for img in frames(cv2.imread(str(pd / r["photo"])), run, f"Drive {r['photo'][:-4]}: \"{c['request']}\"", 1, 1.5,
+                              cdir=cdir):
                 if w is None:
                     w = Writer(out / "drive_run.mp4", img.shape[0])
                 w.put(fit(img, w_h(w)))

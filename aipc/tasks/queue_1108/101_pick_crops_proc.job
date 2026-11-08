@@ -1,0 +1,27 @@
+# 8 Nov, night: the PICK crops again with the barcode located in its own process (fqzc located it on a thread, which
+# held the GIL against the outline drawing: outline 0.06-0.1 -> 0.08-0.19 s, PICK +0.10-0.15 s). Same-load A/B: the
+# final config without crops (fqzp2 = fqzp) and with them (fqzq), back to back, Task 1/2 and Task 3; then the
+# recordings and Leo's Drive photos with the crops (fqzq_live, fqzq_drive). Decisions must equal fqzp*.
+export OCR_ALGO=HEURISTIC
+FB="--imgsz 544x960 --workers 27 --cls-cpu 1 --proc-threads 1 --order skim --snap 1 --refine 1 --refine-device cuda --draw-imgsz 1280 --variants 1 --lazy 1 --ordered-prefetch 1 --priority 1 --refine-webcam 0 --webcam-ends 1"
+OZ="--views $VB --alt-views 1 --alt-lazy 1 --skim-name 1 $R --par-variants 1"
+quiet=0
+while [ $quiet -lt 6 ]; do
+  u=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | tr -d " ")
+  if [ "$u" -lt 30 ]; then quiet=$((quiet+1)); else quiet=0; fi
+  sleep 10
+done
+echo "GPU quiet $(date +%T) load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzp2 2400 time t1_drive t1_orig t2_drive --runs 5 $FB $OZ --procs 24
+echo "load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzq 2400 time t1_drive t1_orig t2_drive --runs 5 $FB $OZ --pick-crops 1 --procs 24
+echo "load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzq_t3 2400 task3 $FB $OZ --pick-crops 1 --procs 20 --claude-slots 1
+echo "load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzp2_t3 2400 task3 $FB $OZ --procs 20 --claude-slots 1
+echo "load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzq_live 3600 live $S $FB $OZ --pick-crops 1 --procs 20
+echo "load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzq_drive 2400 drive $FB $OZ --pick-crops 1 --drive-outlines 1 --procs 20
+echo "load $(cut -d' ' -f1-3 /proc/loadavg)"
+unset OCR_ALGO

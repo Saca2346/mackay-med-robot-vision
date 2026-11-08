@@ -1,0 +1,21 @@
+# 8 Nov, evening: --par-variants 1 (a likely box's outlines read at the same time, the variant rule unchanged) against
+# the same config without it, both with --webcam-ends 1, on a quiet GPU. Decisions must be identical (task3 / live:
+# every request x box; time: picked box and matches of every run). Baseline Task 3 / live = fqzw_t3 / fqzw_live (98).
+export OCR_ALGO=HEURISTIC
+FB="--imgsz 544x960 --workers 27 --cls-cpu 1 --proc-threads 1 --order skim --snap 1 --refine 1 --refine-device cuda --draw-imgsz 1280 --variants 1 --lazy 1 --ordered-prefetch 1 --priority 1 --refine-webcam 0 --webcam-ends 1"
+OZ="--views $VB --alt-views 1 --alt-lazy 1 --skim-name 1 $R"
+quiet=0
+while [ $quiet -lt 6 ]; do
+  u=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | tr -d " ")
+  if [ "$u" -lt 30 ]; then quiet=$((quiet+1)); else quiet=0; fi
+  sleep 10
+done
+echo "GPU quiet $(date +%T) load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzw 2400 time t1_drive t1_orig t2_drive --runs 5 $FB $OZ --procs 24
+run fqzp 2400 time t1_drive t1_orig t2_drive --runs 5 $FB $OZ --par-variants 1 --procs 24
+run fqzp_t3 2400 task3 $FB $OZ --par-variants 1 --procs 20 --claude-slots 1
+echo "load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzw_t3b 2400 task3 $FB $OZ --procs 20 --claude-slots 1
+run fqzp_live 3600 live $S $FB $OZ --par-variants 1 --procs 20
+echo "load $(cut -d' ' -f1-3 /proc/loadavg)"
+unset OCR_ALGO

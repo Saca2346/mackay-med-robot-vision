@@ -54,7 +54,7 @@ opts, args, it = {"--det": "", "--imgsz": "960", "--workers": "8", "--tag": "", 
                   "--algo": "HEURISTIC", "--prefetch": "0", "--ocr-workers": "16", "--order": "index", "--procs": "0",
                   "--proc-device": "cuda", "--proc-threads": "2", "--cls-cpu": "0", "--skim-procs": "0", "--variants": "0", "--claude-slots": "0",
                   "--snap": "0", "--refine": "0", "--refine-device": "cpu", "--draw-imgsz": "0", "--lazy": "0", "--barcode": "0",
-                  "--ordered-prefetch": "0", "--eager-hits": "2", "--priority": "0", "--views": "", "--split-sizes": "0", "--spine-size": "0", "--refine-webcam": "1", "--alt-views": "0", "--skim-name": "0", "--drive-outlines": "0", "--alt-lazy": "0"}, [], iter(sys.argv[1:])
+                  "--ordered-prefetch": "0", "--eager-hits": "2", "--priority": "0", "--views": "", "--split-sizes": "0", "--spine-size": "0", "--refine-webcam": "1", "--alt-views": "0", "--skim-name": "0", "--drive-outlines": "0", "--alt-lazy": "0", "--webcam-ends": "0", "--par-variants": "0", "--pick-crops": "0"}, [], iter(sys.argv[1:])
 for a in it:
     if a in opts:
         opts[a] = next(it)
@@ -227,6 +227,34 @@ def _cached_run(self, img, use_cls=True, count=True):
 if PREFETCH:
     SizeTextReader._run = _cached_run
 
+# --pick-crops 1 (8 Nov, owner): the brand, detail and barcode of the PICKed box are cut after its MATCH, inside the PICK
+# time (pick_parts.py). Brand and detail come from the OCR inputs and tokens of the outline that gave the MATCH, recorded
+# here per read (thread-local; nothing else changes: the same calls, the same results, the same decision).
+PICK_CROPS = opts["--pick-crops"] == "1"
+_REC = threading.local()
+if PICK_CROPS:
+    _base_run = SizeTextReader._run
+
+    def _rec_run(self, img, use_cls=True, *a, **kw):
+        toks = _base_run(self, img, use_cls, *a, **kw)
+        seen = getattr(_REC, "l", None)
+        if seen is not None:
+            seen.append((img, toks))
+        return toks
+
+    SizeTextReader._run = _rec_run
+
+
+def _rec_start(keep):
+    if keep is not None:
+        _REC.l = []
+
+
+def _rec_stop(keep):
+    seen = getattr(_REC, "l", None) if keep is not None else None
+    _REC.l = None
+    return seen
+
 
 def ocr_inputs(crops):
     """The images a full box read asks OCR for (as logged: size labels in 3 orientations, spine tiles)."""
@@ -247,7 +275,11 @@ def ocr_inputs(crops):
 
 POOL = ThreadPoolExecutor(WORKERS)
 OCRPOOL = ThreadPoolExecutor(int(opts["--ocr-workers"])) if PREFETCH and not PROCS else None
-for pool in (POOL, OCRPOOL):
+# --par-variants 1 (8 Nov): the outlines of a likely box (skim showed both numbers or the requested name) are read at
+# the same time on these threads instead of one after another; the variant rule sees the same results in the same order
+PAR_VARIANTS = opts["--par-variants"] == "1"
+VPOOL = ThreadPoolExecutor(24) if PAR_VARIANTS else None
+for pool in (POOL, OCRPOOL, VPOOL):
     if pool:
         list(pool.map(lambda _: reader().read_once(np.full((48, 200, 3), 255, np.uint8)), range(WORKERS * 2)))
 _CACHE.clear()
@@ -360,13 +392,37 @@ def _variants(frame, g):
     return out
 
 
-def full(crops, req):
+def full(crops, req, par=False, keep=None):
     """crops = one prepare_crops result, or a list of them (outline variants). Variants: MATCH only if one variant
-    reaches MATCH and no variant reads a conflicting identity (ignored / expired); then 'needs_confirmation'."""
+    reaches MATCH and no variant reads a conflicting identity (ignored / expired); then 'needs_confirmation'.
+    par (--par-variants 1, likely boxes only): the same reads at the same time, then the same rule on the same list.
+    keep (--pick-crops 1): a dict that gets the OCR inputs and tokens ("seen") of the outline whose read gave the MATCH."""
     many = crops if isinstance(crops, list) else [crops]
-    res = []
+    res, recs = [], []
     n0 = min(len(VARIANTS), len(many)) if ALT_LAZY else len(many)
-    for k in range(len(many)):                          # by index: Outlines makes items 1-3 only when reached
+    if par and VPOOL is not None and len(many) > 1:
+        def rd(k):
+            _rec_start(keep)
+            ev, d, reason, *_ = read_target_evidence(*many[k], reader(), cfg, req, catalog, attempt=3,
+                                                    identity_verified=True)
+            return d, reason, _rec_stop(keep)
+        for k in range(1, n0):                          # the outline crops made here, one thread (Outlines is lazy)
+            many[k]
+        if PREFETCH:
+            prefetch(many[1:n0], 1)
+        out = list(VPOOL.map(rd, range(n0)))
+        res, recs = [(d, r) for d, r, _ in out], [x for *_, x in out]
+        if LAZY and res[0][0] in ("ignored", "expired"):    # as the sequential read: a conflict on the first outline
+            return res[0]
+        ds0 = [d for d, _ in res]
+        if n0 < len(many) and not (MATCH in ds0 or any(d in ("ignored", "expired") for d in ds0)):
+            for k in range(n0, len(many)):
+                many[k]
+            if PREFETCH:
+                prefetch(many[n0:], 1)
+            out = list(VPOOL.map(rd, range(n0, len(many))))
+            res, recs = res + [(d, r) for d, r, _ in out], recs + [x for *_, x in out]
+    for k in range(len(many) if not res else 0):                          # by index: Outlines makes items 1-3 only when reached
         if k == 1 and LAZY:
             if res[0][0] in ("ignored", "expired"):     # --lazy 1: a conflict on the first outline already rules out
                 return res[0]                           # MATCH, so the other outlines cannot change the cell
@@ -378,15 +434,22 @@ def full(crops, req):
                 break
             if PREFETCH:
                 prefetch(many[n0:], 1)
+        _rec_start(keep)
         ev, d, reason, *_ = read_target_evidence(*many[k], reader(), cfg, req, catalog, attempt=3, identity_verified=True)
         res.append((d, reason))
+        recs.append(_rec_stop(keep))
     if len(res) == 1:
+        if keep is not None and res[0][0] == MATCH:
+            keep["seen"] = recs[0]
         return res[0]
     ds = [d for d, _ in res]
     if MATCH in ds:
         if any(d in ("ignored", "expired") for d in ds):
             return "needs_confirmation", "outline variants disagree: " + "; ".join(f"{d}: {r}" for d, r in res)
-        return next(r for r in res if r[0] == MATCH)
+        j = ds.index(MATCH)
+        if keep is not None:
+            keep["seen"] = recs[j]
+        return res[j]
     return res[0]
 
 
@@ -417,7 +480,7 @@ def score(name):
     missed = sorted(set(truth) - set(keys))
     res = {"set": name, "detector": weights, "imgsz": opts["--imgsz"], "boxes_detected": len(groups),
            "boxes_scored": len({p["key"] for p in pairs}), "truth_boxes": len(truth),
-           "ocr_variant": OCR_VARIANT, "views": opts["--views"], "alt_views": ALT_VIEWS, "skim_name": SKIM_NAME, "alt_lazy": ALT_LAZY,
+           "ocr_variant": OCR_VARIANT, "views": opts["--views"], "alt_views": ALT_VIEWS, "skim_name": SKIM_NAME, "alt_lazy": ALT_LAZY, "par_variants": PAR_VARIANTS,
            "truth_boxes_not_detected": missed, "detected_without_truth": sum(k is None for k in keys),
            "pairs": len(pairs), "cells": dict(cells)}
     json.dump({"summary": res, "pairs": sorted(pairs, key=lambda p: (p["box"], p["asked"]))},
@@ -500,6 +563,8 @@ def read_all(frame, groups, req, t0):
     --order skim: boxes whose one-pass skim shows more requested numbers go first (order only). -> pick, done, t_skim"""
     SNAPPED.clear()
     STAGE.clear()
+    KEPT.clear()
+    PARTS.clear()
     t_c = time.perf_counter()
     crops = [variant_crops(frame, g) if len(VARIANTS) > 1 else prepare_crops(frame, g, cfg) for g in groups]
     STAGE["crop_s"] = time.perf_counter() - t_c      # first outline of every box (the other 3: crop_more_s, lazily)
@@ -535,7 +600,11 @@ def read_all(frame, groups, req, t0):
     def one(i):
         if PREFETCH and not ORDERED:  # this box's OCR calls all at once, when its read starts (--workers boxes at a time)
             prefetch(first_calls(i))
-        return full(crops[i], req)
+        keep = {} if PICK_CROPS else None
+        d = full(crops[i], req, par=PAR_VARIANTS and (hits[i] >= EAGER_HITS or bool(names[i])), keep=keep)
+        if keep:
+            KEPT[i] = keep
+        return d
 
     futs = {POOL.submit(one, i): i for i in order}
     pick, done = None, []
@@ -543,10 +612,21 @@ def read_all(frame, groups, req, t0):
         d, reason = f.result()
         done.append((futs[f], d, time.perf_counter() - t0, reason))
         if d == MATCH and pick is None:
+            i = futs[f]
+            if PICK_CROPS:                             # the barcode is located in its own process, beside the outline
+                t_p = time.perf_counter()
+                spine, m = pick_parts.spine_of(frame, groups[i].box.poly)
+                bc = CROPPOOL.submit(pick_parts.find_bars, spine)
             if opts["--snap"] == "1":                  # the outline to draw is part of the PICK time
                 t_s = time.perf_counter()
                 SNAPPED[futs[f]] = snap_outline(frame, groups[futs[f]].box.poly)
                 STAGE["snap_s"] = time.perf_counter() - t_s
+            if PICK_CROPS:                             # the brand / detail / barcode crops are part of the PICK time
+                t_w = time.perf_counter()
+                PARTS[i] = {**pick_parts.text_parts(KEPT.get(i, {}).get("seen") or [], req),
+                            **pick_parts.barcode_from(spine, m, *bc.result())}
+                STAGE["crops_s"] = time.perf_counter() - t_p          # from the MATCH, beside the outline
+                STAGE["crops_after_outline_s"] = time.perf_counter() - t_w   # what the crops add after the outline
             pick = (futs[f], time.perf_counter() - t0)
     return pick, done, t_skim
 
@@ -556,6 +636,16 @@ import tightlib  # noqa: E402
 
 SNAP = dict(blur=1.5, end=0.02, lam=0.6, bias=-0.02)   # chosen on the dev photos only (det/snap_eval.py, round 3)
 SNAPPED = {}
+KEPT, PARTS = {}, {}                        # --pick-crops 1: per box the MATCH outline's OCR record; the PICK's crops
+CROPPOOL = None
+if PICK_CROPS:
+    import pick_parts  # noqa: E402
+    import multiprocessing as mp  # noqa: E402
+    from concurrent.futures import ProcessPoolExecutor  # noqa: E402
+    # the barcode of the PICKed box in its own process: on a thread it held the GIL against the outline drawing (8 Nov,
+    # fqzc: outline 0.06-0.1 -> 0.08-0.19 s); only the straightened box (~0.4 MB) is sent. Started and warmed up here.
+    CROPPOOL = ProcessPoolExecutor(1, mp_context=mp.get_context("spawn"), initializer=pick_parts.init_worker, initargs=(C,))
+    CROPPOOL.submit(pick_parts.find_bars, np.full((400, 80, 3), 200, np.uint8)).result()
 STAGE, _STAGE_LOCK = {}, threading.Lock()   # stage times of the last request (logged only, never used by a decision)
 
 
@@ -593,6 +683,12 @@ def snap_outline(frame, poly):
         # 7 Nov: the refiner was trained and tested on phone photos only (owner outlines), never on webcam frames;
         # on the Task 3 shelf stills it put the top end of K04 and K10 into the shelf bar. --refine-webcam 0: a webcam
         # frame (Task 3, the recordings) gets the 1280 px outline as detected. Rule set after seeing K04 / K10.
+        if opts["--webcam-ends"] == "1" and REFINER is not None:
+            # 8 Nov: that outline stops short of a dark box bottom (Accuforce); each END may move to the refiner's
+            # end only where the band between them looks like the side it joins (webcam_ends.ends_by_colour). Rule
+            # designed after seeing the Task 3 and recording stills; drawing only, the decision is already made.
+            import webcam_ends
+            return webcam_ends.ends_by_colour(frame, poly, REFINER(frame, poly)).astype(np.float32)
         return np.asarray(poly, np.float32)
     if REFINER is not None:
         return REFINER(frame, poly).astype(np.float32)
@@ -611,7 +707,7 @@ def gradient_snap(frame, poly):
     return tightlib.snap(p - [x0, y0], gx, gy, SNAP["end"], 0.0, SNAP["lam"], side_bias=SNAP["bias"]) + [x0, y0]
 
 
-def request_once(name):
+def request_once(name, key=None):
     """The mentor's request: photo from disk -> boxes -> all boxes read at once -> PICK. -> timings dict."""
     req = parse_request(SETS[name][1])
     _CACHE.clear()
@@ -625,7 +721,16 @@ def request_once(name):
     return {"read_photo_s": t_read, "detect_s": t_det - t_read, "boxes": len(groups), "pick": pick, "skim_s": t_skim,
             "all_read_s": t_all, "matches": sorted(i for i, d, *_ in done if d == MATCH),
             # log for the evidence videos (taken after the clock stopped): when each box's read ended, and the outlines
-            "events": [[i, d, round(t, 4), why] for i, d, t, why in done], **outlines(groups, pick), **stages()}
+            "events": [[i, d, round(t, 4), why] for i, d, t, why in done], **outlines(groups, pick), **stages(),
+            **(save_parts(key, pick) if key else {})}
+
+
+def save_parts(key, pick):
+    """--pick-crops 1, after the clock: the PICK's crops written to out/<tag>/crops/<key>/ -> {"crops": info} or {}."""
+    if not (PICK_CROPS and pick and pick[0] in PARTS):
+        return {}
+    info = pick_parts.save(os.path.join(OUT, "crops", key), PARTS[pick[0]], reader())
+    return {"crops": dict(info, dir=f"crops/{key}")}
 
 
 def stages():
@@ -641,11 +746,11 @@ def outlines(groups, pick):
 
 def timing(name):
     request_once(name)                                     # warm-up (first call builds GPU kernels)
-    runs = [request_once(name) for _ in range(int(opts["--runs"]))]
+    runs = [request_once(name, f"{name}_run{k + 1}") for k in range(int(opts["--runs"]))]
     picks = [r["pick"][1] for r in runs if r["pick"]]
     res = {"set": name, "request": SETS[name][1], "detector": weights, "imgsz": opts["--imgsz"], "workers": WORKERS,
            "prefetch": PREFETCH, "order": opts["--order"], "ocr_workers": opts["--ocr-workers"], "procs": PROCS, "proc_device": opts["--proc-device"],
-           "proc_threads": opts["--proc-threads"], "cls_cpu": opts["--cls-cpu"], "skim_procs": opts["--skim-procs"], "variants": len(VARIANTS), "views": opts["--views"], "alt_views": ALT_VIEWS, "skim_name": SKIM_NAME, "alt_lazy": ALT_LAZY, "lazy": LAZY, "snap": opts["--snap"], "refine": opts["--refine"], "refine_device": opts["--refine-device"], "draw_imgsz": opts["--draw-imgsz"], "barcode": opts["--barcode"], "ordered_prefetch": ORDERED, "eager_hits": EAGER_HITS, "priority": DISPATCH is not None,
+           "proc_threads": opts["--proc-threads"], "cls_cpu": opts["--cls-cpu"], "skim_procs": opts["--skim-procs"], "variants": len(VARIANTS), "views": opts["--views"], "alt_views": ALT_VIEWS, "skim_name": SKIM_NAME, "alt_lazy": ALT_LAZY, "par_variants": PAR_VARIANTS, "pick_crops": PICK_CROPS, "lazy": LAZY, "snap": opts["--snap"], "refine": opts["--refine"], "refine_device": opts["--refine-device"], "draw_imgsz": opts["--draw-imgsz"], "barcode": opts["--barcode"], "ordered_prefetch": ORDERED, "eager_hits": EAGER_HITS, "priority": DISPATCH is not None,
            "cache": dict(STATS), "ocr_variant": OCR_VARIANT,
            "runs": len(runs), "picked_box": [r["pick"][0] if r["pick"] else None for r in runs],
            "matches_each_run": [r["matches"] for r in runs],
@@ -735,7 +840,8 @@ def task3(_name=None):
                "pick_box": ids[pick[0]] if pick else None, "pick_s": round(pick[1], 3) if pick else None,
                "detect_s": round(t_det, 3), "all_read_s": round(t_all, 3),
                "decisions": [[ids[i], d, why] for i, (d, why) in sorted(dec.items())],
-               "events": [[i, d, round(t, 4)] for i, d, t, _ in done], "ids": ids, **outlines(groups, pick), **stages()}
+               "events": [[i, d, round(t, 4)] for i, d, t, _ in done], "ids": ids, **outlines(groups, pick), **stages(),
+               **save_parts(f"task3_{r['id']}", pick)}
         u_green = False
         for i, (d, _) in dec.items():
             if tgt in UNKNOWN and ids[i] == "U":                # only without --claude-slots             # one of the U slots is the target: truth per box unknown
@@ -753,8 +859,8 @@ def task3(_name=None):
     right = lambda x: x["pick_box"] == x["target"] or (x["target"] in UNKNOWN and x["pick_box"] == "U")  # noqa: E731
     green_t = [x["pick_s"] for x in live if x["pick_box"] and right(x)]
     res = {"detector": weights, "imgsz": opts["--imgsz"], "workers": WORKERS, "requests": len(rows),
-           "claude_slots": opts["--claude-slots"] == "1", "ocr_variant": OCR_VARIANT, "variants": len(VARIANTS), "views": opts["--views"], "alt_views": ALT_VIEWS, "skim_name": SKIM_NAME, "alt_lazy": ALT_LAZY, "procs": PROCS, "lazy": LAZY, "ordered_prefetch": ORDERED, "priority": DISPATCH is not None,
-           "snap": opts["--snap"], "refine": opts["--refine"], "on_shelf": len(live), "on_shelf_green_right_box": len(green_t),
+           "claude_slots": opts["--claude-slots"] == "1", "ocr_variant": OCR_VARIANT, "variants": len(VARIANTS), "views": opts["--views"], "alt_views": ALT_VIEWS, "skim_name": SKIM_NAME, "alt_lazy": ALT_LAZY, "par_variants": PAR_VARIANTS, "pick_crops": PICK_CROPS, "procs": PROCS, "lazy": LAZY, "ordered_prefetch": ORDERED, "priority": DISPATCH is not None,
+           "snap": opts["--snap"], "refine": opts["--refine"], "webcam_ends": opts["--webcam-ends"], "on_shelf": len(live), "on_shelf_green_right_box": len(green_t),
            "wrong_box_green": sum(1 for x in rows for b in x["green_boxes"]
                                   if b != x["target"] and not (b == "U" and x["target"] in UNKNOWN)),
            "green_by_elimination": sum(1 for x in live if x["target"] in UNKNOWN and "U" in x["green_boxes"]),
@@ -815,13 +921,13 @@ def live(setdir):
                      "all_read_s": round(t_all, 3), "decisions": [[ids[i], d, why] for i, (d, why) in sorted(dec.items())],
                      "events": [[i, d, round(t, 4)] for i, d, t, _ in done], "ids": ids, **outlines(groups, pick),
                      "stills_read": still_used, "stills": len(stills),
-                     **stages()})
+                     **stages(), **save_parts(f"{os.path.basename(os.path.normpath(setdir))}_{r['id']}", pick)})
         print(r["id"], r["request"], "->", rows[-1]["pick_box"], rows[-1]["pick_s"], "greens", rows[-1]["green_boxes"],
               flush=True)
     green_t = [x["pick_s"] for x in rows if x["pick_box"] == x["target"]]
     res = {"set": os.path.basename(os.path.normpath(setdir)), "source_run": s["source_run"], "detector": weights,
-           "imgsz": opts["--imgsz"], "ocr_variant": OCR_VARIANT, "variants": len(VARIANTS), "views": opts["--views"], "alt_views": ALT_VIEWS, "skim_name": SKIM_NAME, "alt_lazy": ALT_LAZY, "procs": PROCS,
-           "refine": opts["--refine"], "requests": len(rows), "slots": len(order), "green_right_box": len(green_t),
+           "imgsz": opts["--imgsz"], "ocr_variant": OCR_VARIANT, "variants": len(VARIANTS), "views": opts["--views"], "alt_views": ALT_VIEWS, "skim_name": SKIM_NAME, "alt_lazy": ALT_LAZY, "par_variants": PAR_VARIANTS, "pick_crops": PICK_CROPS, "procs": PROCS,
+           "refine": opts["--refine"], "webcam_ends": opts["--webcam-ends"], "requests": len(rows), "slots": len(order), "green_right_box": len(green_t),
            "wrong_box_green": sum(1 for x in rows for b in x["green_boxes"] if b not in (x["target"], "?")),
            "green_count_mismatch_photo": sum(1 for x in rows for b in x["green_boxes"] if b == "?"),
            "count_mismatch": mismatch,
@@ -936,7 +1042,7 @@ def drive(photo_dir):
             row["chosen"] = {"box": i0, "request": text, "pick_box": pick[0] if pick else None,
                              "pick_s": round(pick[1], 3) if pick else None, "greens": greens, "all_read_s": round(t_all, 3),
                              "detect_s": round(t_det, 3), "events": [[i, d, round(t, 4)] for i, d, t, _ in done],
-                             "stages": dict(STAGE), **outlines(groups2, pick)}
+                             "stages": dict(STAGE), **outlines(groups2, pick), **save_parts(f"drive_{stem}", pick)}
             if pick:
                 poly = SNAPPED.get(pick[0], groups2[pick[0]].box.poly)
                 cv2.polylines(vis, [np.rint(poly).astype(np.int32)], True, (60, 200, 0), tk, cv2.LINE_AA)
@@ -1028,7 +1134,7 @@ def main():
     else:
         for n in names:
             {"score": score, "time": timing}[mode](n)
-    for pool in (PPOOL, SKIMPOOL):
+    for pool in (PPOOL, SKIMPOOL, CROPPOOL):
         if pool:
             pool.shutdown()
 

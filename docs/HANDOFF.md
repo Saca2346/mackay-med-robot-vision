@@ -2,6 +2,72 @@
 
 Newest entry first. One entry per finished piece of work: date, who, what changed, how it was tested, what is open.
 
+## 2026-11-09 - Claude Code: hand-over to Codex (`docs/CODEX_RESUME_AIPC_20261109.md`)
+
+* Owner asked: the Task 1-3 result photos and videos were missing from the deck; merge the WhatsApp copy into Task 1 and
+  drop the WhatsApp / WA name; write a resume; then commit and push so the work can continue in Codex.
+* Cause of the missing pictures: Git Bash turned the `/_blob/<id>` arguments of a patch script into
+  `C:/Program Files/Git/_blob/...`, so the Task 1-3 slides of deck Version 23 pointed at nothing. Fixed in Version 24;
+  each Task 1-3 slide now shows its result photo and plays its run video from it.
+* The mentor's Task 1 photo (`t1_orig`) is "Task 1, mentor's photo" in the deck, the video titles
+  (`evidence_video.py`) and the crop sheets (`crop_sheet.py`); the separate WhatsApp column of the speed table is merged
+  into Task 1. No result changed.
+* `docs/CODEX_RESUME_AIPC_20261109.md`: state, final configuration and results, where photos / videos / runs are, tools,
+  open items in order, pitfalls. Tests: 672 passed. Committed and pushed on the owner's word.
+
+## 2026-11-08 (night) - Claude Code: brand, detail and barcode crops of every PICK (aipc/README.md `--pick-crops 1`)
+
+* Owner asked: the brand, detail and barcode crops were missing; add the crop task from the box and run the process
+  again. Commit / push only on the owner's word: nothing of the evening or night is committed (`6c91e53` not pushed).
+* `aipc_tasks.py --pick-crops 1` + `tasks/pick_parts.py`: after the MATCH, inside the PICK time, the PICKed box gets
+  BRAND (product-name tokens the OCR read on the MATCH outline, cut from that OCR input), DETAIL (size, REF, GTIN-text
+  tokens, one block of print per line) and BARCODE (bars only, `src/box_crops.find_barcode` on the box straightened at
+  full resolution, in its own process beside the outline; located, never decoded: decoding stays off). The OCR inputs
+  and tokens of each outline read are recorded thread-locally; no new OCR for brand / detail; display only, after the
+  decision. Saved after the clock to `out/<tag>/crops/<key>/` (+ `crops.json`, barcode corners in photo px).
+* Runs (queue/100-102): thread version `fqzc*` (barcode on a thread held the GIL: outline +0.05-0.1 s) -> process
+  version. Same-load A/B without / with crops (`fqzp2*` / `fqzq*`): T1 1.04 / 1.15 s, T1 mentor's photo 0.91 / 0.87, T2 1.26 / 1.26,
+  T3 median 1.69 / 1.62, 7 / 7 of 11 < 2 s. Final `fqzf*` (CPU load 11-60): T1 1.05 s (mentor's photo 0.87), T2 1.28, T3 1.79 s
+  (8/11 < 2 s, Accuforce 2.17-2.24), recordings 13/4/4 green (median 1.61/2.24/5.22 s), Drive 9 PICKs 1.1-4.5 s.
+  Every decision identical to `fqzp*` (820 Task 3 pairs, recordings, every timing run's box; Drive PICKs; the untimed
+  Drive discovery differs on 2 photos by OCR memory errors). Crops: brand 41 / detail 44 / barcode 24 of 44 PICKs
+  (barcode not found = no 1-D bars on that face, e.g. Sled Bag 2-D code, iVascular spines, or bars too fine).
+* Display turn of the crops (0 / 180): confidence, string closeness, classifier on / off and the direction classifier
+  each failed on some digit blocks; final rule (`pick_parts.upright`): tokens read in the run, then RapidOCR's
+  classifier on the run's own lines asked on both turns, then on / off. The `fqzf*` crops were turned again on the laptop
+  with it (`tasks/recheck_upright.py`, display only, recorded in crops.json); stable (a second pass turns none).
+  Claude checked all 44 crop rows by eye (sheets `crop_sheet.py`), not the owner.
+* Pictures / videos: `pick_still.py` and `evidence_video.py` add the BRAND | DETAIL | BARCODE strip (stacked under a
+  portrait photo); video titles no longer run under the clock. Deck Version 23 (42 slides): new slides 18-19 (crops),
+  Task 1-3, recordings, Drive, videos, speed, cover, next, housekeeping, evidence updated.
+* Tests: `tests/test_aipc_pick_parts.py` (11). OPEN: Accuforce over 2 s on a busy server; decoding the located barcodes
+  (and a 2-D reader for the Sled Bag) only after the rule gap is closed (owner).
+
+## 2026-11-08 (evening) - Claude Code: untidy outlines in the deck, Accuforce under ~2 s (aipc/README.md "8 Nov")
+
+* Owner asked: find the pictures whose outline is untidy like the Task 2 slide (and Task 3), tidy them, continue what was
+  open, then report; commit / push only on the owner's word (the evening changes are NOT committed; `6c91e53` is the
+  afternoon work, not pushed).
+* Cause: slides 15-17 and the three video slides still showed 7 Nov output (Task 2: a slanted outline into the stacked
+  box above; Task 3 K07: top into the shelf bar). The final 8 Nov outlines of Task 1/2 and of the 9 Drive greens are tight
+  (checked by zoom). On webcam stills the final 1280 outline stopped 20-35 px short of the dark Accuforce bottoms
+  (K07/K16/K21); the refiner puts those bottoms right but the tops into the shelf bar / blinds.
+* `--webcam-ends 1` (`tasks/webcam_ends.py`, drawing only): 1280 outline, each END moved to the refiner's end only where
+  the band between them looks like the side it joins (mean Lab, no threshold); bands past the photo edge: kept. Designed
+  after seeing the Task 3 / recording stills (no truth for webcam frames). Claude's zoom check of the 32 webcam PICKs:
+  24 of 64 ends moved, 12 better, 10 within 8 px, 2 worse (box20 K03 top ~8 px over, box20 K18 bottom 18 px in).
+  Same decisions (`fqzw_t3`, `fqzw_live`).
+* `--par-variants 1`: a likely box's 4 outlines read at the same time (`VPOOL`), the same rule on the same list (incl.
+  the first-outline conflict stop and `--alt-lazy`). Same decisions everywhere. Same load A/B (`fqzw*` vs `fqzp*`):
+  T1 1.13 -> 1.04 s, WA 0.85 -> 0.81, T2 1.34 -> 1.26, T3 7 -> 9 of 11 < 2 s, slowest 3.23 -> 2.05 s (Accuforce
+  2.00-2.05). Recordings 13/4/4 green, median 1.57 / 2.16 / 5.17 s. Afternoon numbers (CPU load 30-47) stay in the deck
+  next to the evening ones (load 6-32): the load explains most of the rest.
+* Deck pictures / videos now drawn from the final logs: `tasks/pick_still.py`; `evidence_video.py` shows the green box at
+  the logged PICK time, puts the zoom away from the box, and shows the still read last for multi-still recordings.
+  Deck Version 22 (40 slides): Task 1-3, videos, recordings, speed, fail-case pictures (+ Accuforce ends), cover, next.
+* OPEN: two Accuforce requests at 2.02 / 2.05 s; 1 s reached only on the WhatsApp copy (0.81 s); a batched OCR process
+  is the next speed step. The end rule has no owner truth: owner outlines of ~10 shelf stills would test it.
+
 ## 2026-11-08 - Claude Code: fail cases fixed first, tilted boxes, then speed (aipc/README.md "8 Nov")
 
 * Owner asked: fix the fail cases, find the tilted / missed boxes with the best model, aim at 98% of boxes read,

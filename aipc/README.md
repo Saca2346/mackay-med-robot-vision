@@ -42,7 +42,7 @@ untouched). Photos, recordings, models and inventory files stay on the lab serve
 | `final.sh` | The final timing run (four outlines, lazy, edge-corrected outline), Task 3 both ways, one-outline comparison. |
 | `final_all.sh`, `quiet_ab.sh`, `quiet_ab2.sh` | Timing runs gated on an idle GPU (wait until utilisation < 10% for 30 s), GPU load logged. |
 | `ab_speed.sh`, `prio_ab.sh`, `t3_ab.sh` | Interleaved speed A/B of the fixes (arena, lazy crops, ordered queue, priority queue, eager outlines). |
-| `close_runs.sh` | WhatsApp timing of the final reader and the equivalence of the scheduling fixes on all 814 pairs. |
+| `close_runs.sh` | Timing on the mentor's Task 1 photo with the final reader and the equivalence of the scheduling fixes on all 814 pairs. |
 | `video_runs.sh`, `evidence_video.py` | Logged runs and, on the laptop, the evidence videos replayed from their logs (nothing decided in the video). |
 | `stop_mine.sh` | Stops this work's runners and OCR processes on the server (not the training queue, not other users). |
 | `stages.sh` | Stage times of the final reader (photo read, detection, crops, skim, each box verified, PICK, all read). |
@@ -56,7 +56,7 @@ untouched). Photos, recordings, models and inventory files stay on the lab serve
 Final reader (5 Nov; refiner 6 Nov; 1280 drawing 7 Nov): `aipc_main.py time|task3 ... --imgsz 544x960 --workers 27 --procs 24
 --cls-cpu 1 --proc-threads 1 --order skim --snap 1 --refine 1 --refine-device cuda --draw-imgsz 1280 --variants 1 --lazy 1
 --ordered-prefetch 1 --priority 1` (Task 3 with `--procs 20`: 24 processes ran out of the shared card's memory). Quiet GPU,
-7 Nov (`final_quiet.sh`): Task 1 1.18 s, Task 2 1.55 s, WhatsApp copy no box (all read 1.67 s), Task 3 median 1.96 s with 9
+7 Nov (`final_quiet.sh`): Task 1 1.18 s, Task 2 1.55 s, Task 1 mentor's photo no box (all read 1.67 s), Task 3 median 1.96 s with 9
 of 20 right boxes green; recordings 20 / 12 / close: 12 / 3 / 0 green (laptop live 12 / 4 / 3); Drive: 6 green photos.
 Same cells as without the scheduling options on all 814 task-photo pairs and 41 Task 3 requests (`equiv.sh`,
 `close_runs.sh`). The refiner needs `det/weights/refiner.pt` (server only, not in git).
@@ -81,7 +81,7 @@ changes the drawn outline, never the crops that are read.
 
 ### 8 Nov: fail-case fixes (AI PC only; the laptop's src/ is unchanged)
 
-| Option | What it does | Effect (asked box green, T1 · T2 · WA · T3, of 7 · 26 · 7 · 20; wrong green 0 in every run) |
+| Option | What it does | Effect (asked box green, T1 · T2 · T1 mentor · T3, of 7 · 26 · 7 · 20; wrong green 0 in every run) |
 |---|---|---|
 | `--split-sizes 1` (`size_split.py`) | A joined size word ("3.533") is split when exactly one split is a valid size (d.0/d.5 + 6-99, or d.00/.25/.50/.75 + 6-200). | 6 · 17 · 2 · 9 -> 6 · 19 · 2 · 9 |
 | `--spine-size 1` (`size_split.py`) | No size label found: the big printed numbers of the spine, by the laptop's `size_field_tokens` rule (numerals >= 22% of the strip height). | -> 6 · 23 · 7 · 11 |
@@ -91,6 +91,9 @@ changes the drawn outline, never the crops that are read.
 | `--skim-name 1` | Speed: read order by the requested product name in the skim, then the numbers; the 4 outlines of the few boxes with the name are queued at once. | same cells (`rd_altz`) |
 | `--refine-webcam 0` | Webcam frames (Task 3, recordings) get the 1280 outline without the refiner (it ran into the shelf bar on K04 / K10; rule set after seeing them). | drawing only |
 | `--drive-outlines 1` | `drive`: the discovery reads every outline the reader reads (before: the first outline only). | Drive two-source boxes 38 -> 100 (544) -> 138 (final) |
+| `--webcam-ends 1` (`webcam_ends.py`) | Webcam frames, drawing only: the 1280 outline, each END moved to the refiner's end only where the band between the two looks like the side it joins (the box when extending, what lies beyond when shrinking; mean Lab, no threshold); an end whose bands reach past the photo edge is kept. The 1280 outline stopped 20-35 px short of the dark Accuforce bottoms; the refiner runs tops into the shelf bar. Designed after seeing the Task 3 and recording stills (no truth exists for webcam frames). | same cells (`fqzw_t3`, `fqzw_live`); 24 of the 64 ends of the 32 webcam PICKs moved: by Claude's zoom check 12 better, 10 within 8 px, 2 worse (`webcam_ends.py` sheets) |
+| `--par-variants 1` | Speed: the outlines of a likely box (skim showed both numbers or the requested name) are read at the same time (`VPOOL`), then the same variant rule on the same list in the same order (incl. the stop on a first-outline conflict and `--alt-lazy`). | same decisions in every run (820 Task 3 pairs, recordings, the picked box of every timing run); at the same server load (`fqzw*` -> `fqzp*`, queue/99_par_variants.job): T1 1.13 -> 1.04 s, T1 mentor 0.85 -> 0.81 s, T2 1.34 -> 1.26 s, T3 median 1.73 s both, 7 -> 9 of 11 greens < 2 s, slowest 3.23 -> 2.05 s (Accuforce 2.00-2.05 s) |
+| `--pick-crops 1` (`pick_parts.py`) | After the MATCH, inside the PICK time (8 Nov night, owner): the PICKed box's BRAND (the product-name tokens the OCR read on the outline that gave the MATCH, cut from that OCR input), DETAIL (the size, REF and GTIN-text tokens read there, one line per block of print) and BARCODE (bars only, `src/box_crops.find_barcode` on the box straightened at full resolution, in its own process beside the outline drawing; LOCATED, not decoded: decoding stays off) -> `out/<tag>/crops/<key>/` PNGs + `crops.json` (texts, barcode corners in photo px, every token read). Text running down an OCR input is cut by its text height and turned; the display turn (0 / 180): the tokens read in the run, then RapidOCR's direction classifier on the run's own lines asked on both turns (`recheck_upright.py` applied it again on the laptop to the `fqzf*` crops). Display, report and arm only, after the decision. | same decisions (`fqzq*`, `fqzf*`); same-load A/B without / with (`fqzp2*` / `fqzq*`, queue/101_pick_crops_proc.job): T1 1.04 / 1.15 s, T1 mentor 0.91 / 0.87, T2 1.26 / 1.26, T3 median 1.69 / 1.62, 7 / 7 of 11 < 2 s (server load ~34). On a thread (`fqzc`) the barcode search held the GIL against the outline: +0.10-0.15 s. Final `fqzf*`: brand 41, detail 44, barcode located 24 of 44 PICKs |
 
 `--alt-views` was designed after seeing which Task 1 / Task 2 boxes each outline read: chosen on the test photos
 (disclosed in the deck). The view order (1280 first) was chosen on the held-out 28-Sep session. Leo's Drive photos and
@@ -99,6 +102,13 @@ in `queue/`, one GPU run at a time, each stopped after its time limit; a Drive r
 OCR worker could not get GPU memory while the detector probe ran). `ocr_worker.py` logs an engine error with its message
 and retries the image once at 0.75 scale (the errors are GPU memory, `BFCArena`, worse with more detector views).
 Diagnosis: `dbg_alt.py`, `dbg_reads.py`, `drive_cmp.py`.
+
+Pictures and videos of the deck are drawn from the run logs on the laptop: `pick_still.py` (the request, the
+logged PICK outline, a full-resolution zoom) and `evidence_video.py` (8 Nov: the green box appears at the logged PICK
+time, the zoom sits on the side away from the box, multi-still recordings show the still that was read last).
+A run made with `--pick-crops 1` also gets its crops in both (BRAND | DETAIL | BARCODE strip under the photo,
+stacked under a portrait photo; in the video from the PICK on), and `crop_sheet.py` draws one sheet of the crops
+of every PICK of a run (deck).
 
 ## Product model (`look/`)
 
