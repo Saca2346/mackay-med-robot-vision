@@ -2,6 +2,60 @@
 
 Newest entry first. One entry per finished piece of work: date, who, what changed, how it was tested, what is open.
 
+## 2026-11-10 - Claude Code: product and brand as two crops, final runs repeated (`fqzg*`)
+
+* Owner asked: the crop called BRAND held the product name (Essential Pro); keep the product apart from the brand (the
+  maker, iVascular), with names that agree with the inventory CSV and the earlier records; one example first
+  (`ex1110_drive`, Drive photo Essential Pro), then, on the owner's OK, every box and the decks.
+* `tasks/pick_parts.py`: crops PRODUCT (name tokens on the MATCH outline, inside the PICK time), BRAND (maker tokens
+  there; else `brand_from_spine`: the straightened box read once more after the clock, whole and its two ends scaled up,
+  display only, `brand_read_s` logged), DETAIL, BARCODE. Labels from `NAMES` (agrees with the inventory CSV of 9 Nov,
+  `data/gtin_catalog.csv` and `src/box_verifier.BRANDS`; src unchanged). `upright_maker`: the brand crop's display turn
+  by the surer maker reading of the two turns (cls off), else `upright` (one 20-box K21 TERUMO crop was upside down;
+  turned again on the laptop, display only). `evidence_video.crop_items` / `crop_sheet.py`: four tiles, old logs still
+  drawn (old "brand" shown as PRODUCT).
+* Runs (queue/103, 104; tags `fqzg*`, `fqzab_*`): decisions identical to `fqzf*` (133 of 135 compared; the 2 differ in
+  the untimed Drive discovery: demo carton now asks Essential Pro 3 x 40, box 17, which had two sources on 8 Nov too;
+  checked on the photo). Times on a loaded server: T1 1.13 s (mentor's photo 0.94), T2 1.41, T3 median 1.73 (7/11 < 2 s,
+  Accuforce 2.13-2.41), recordings 1.75 / 2.27 / 5.65 s, Drive 0.9-4.2 s. Same-load A/B 8 Nov vs 10 Nov crop code,
+  alternated twice: T1 1.21/1.14 vs 1.20/1.16, mentor 0.95/0.95 vs 0.90/0.94, T2 1.35/1.40 vs 1.40/1.32: no cost.
+  Crops over 44 PICKs: product 41, brand 39 (16 outline + 23 box after PICK; not legible on the 4 close-camera boxes and
+  the Nagomi Drive photo), detail 44, barcode 23. Claude checked every crop by eye, not the owner.
+* Pictures `final_1108/stills_g`, `videos_g`, `deck_g`; summary deck Version 13, big deck Version 29.
+  Tests: 675 passed. Committed 11 Nov (owner's word).
+* Later (owner): slide 1 of the summary deck without a cover, straight to how the program is started on the AI PC.
+  `tasks/demo_start.sh` on the AI PC (copy `final_1108/videos_g/aipc_start_demo_start.sh`), recorded with `asciinema rec`
+  (`aipc_start_run.cast`), drawn to `aipc_start_run.mp4` at real speed with a recording clock (pyte, scratch only).
+  One Task 1 run, final flags, tag `demo1110` (scratch): PICK box 1 in 1.263 s, 32 s with model loading; crops product
+  SeQuent Please NEO, brand B. Braun (outline read). Summary deck Version 15: new slide `start` replaces `cover`.
+  Drive folder "AI PC Vision · 10 Nov 2026" (owner's Drive) holds a README; the videos are uploaded by the owner (the
+  Drive connector takes no files of this size).
+* Then (owner): the same start slide as slide 1 of the big deck (cover removed), and the AI PC specification slide of
+  the summary deck replaced by every box detected on Leo's 39 Drive photos. `tasks/det_sheet_mv.py` (AI PC, detection
+  only: final views B:1280 + B:544x960, `group_labels` + `drop_wide` as the reader) -> `out/detsheet_drive1110`
+  (numbered sheets + `dets.json` with outlines; copy in `final_1108/detsheet_drive1110`): every photo's count equals the
+  `fqzg_drive` run, 936 in total. Grid `deck_g/drive_det_grid_39.jpg` (`drive_det_grid.py`): product, maker, box count,
+  border = `fqzg_drive` result (PICK 9, catalogue one source 6, not in catalogue 23, no box 1). Known false box: a
+  handwritten shelf label on the Orsiro photo. Summary deck Version 17 (`drivedet` after `drive`, `aipc` removed),
+  big deck Version 32 (43 slides: `start` first, `drivedet` before `drive1`).
+- Slide 1 re-recorded with the model running live (owner: the terminal-only video showed no model at work):
+  `tasks/live_window.py` (new viewer, not production) imports `aipc_tasks` with the final flags and calls its own
+  `boxes` / `read_all` / `save_parts`, showing photo -> cyan boxes -> green PICK + crops in a window; recorded on
+  the AI PC on Xvfb :91 with ffmpeg x11grab (`rec_live.sh`, `live_start.sh`), real speed, 1:46, clock added on the
+  laptop. One run each: T1 Drive box 1 1.18 s, T2 Drive box 17 1.49 s, T3 K04 essential pro 1.90 s, K10 angiolite
+  1.91 s (shelf position of the green box not checked in this recording), N01 absent: none. Load 24.8 s. Files in
+  `final_1108/videos_g/aipc_live_run*`; summary deck Version 19, big deck Version 34; old start slides backed up in
+  the scratchpad (`*_start_1110_terminal_backup.html`).
+- 11 Nov (owner): last slide of the summary deck = confusion matrix only, with the formulas computed. `cm` replaces
+  `open` (Version 20, still 10 slides). Cells re-read from the run files: rd_zh (T1 Drive 7/0/0/56, T1 mentor
+  7/0/0/42, T2 24/0/2/676), fqzg_t3 11/0/9/800, fqzg_live 21/0/19/600 -> TP 70, FP 0, FN 30, TN 2,174, N 2,274:
+  precision 100 %, recall 70.0 %, specificity 100 %, accuracy 98.7 %, F1 0.824, NPV 98.6 %, MCC 0.831, FP-rate 95 %
+  bound 0.14 %. The open items now only in the big deck's `next` slide.
+- 11 Nov (owner): committed and pushed on this branch, with the five AI PC scripts of 10 Nov copied into the repo
+  (`aipc/tasks/live_window.py`, `live_start.sh`, `rec_live.sh`, `demo_start.sh`, `det_sheet_mv.py`; documentation and
+  detection-sheet tools, not production). Pull request to `main` opened for the other teams. Models, inventory, photos
+  and videos stay off GitHub (Drive, private).
+
 ## 2026-11-09 - Claude Code: hand-over to Codex (`docs/CODEX_RESUME_AIPC_20261109.md`)
 
 * Owner asked: the Task 1-3 result photos and videos were missing from the deck; merge the WhatsApp copy into Task 1 and

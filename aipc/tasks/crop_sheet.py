@@ -1,6 +1,7 @@
 """One sheet of the crops every PICK of a run cut from its box (8 Nov 2026, night; aipc_tasks.py --pick-crops 1,
 pick_parts.py), drawn on the laptop from the run logs: one row per PICK, the request and PICK time on the left, then
-BRAND | DETAIL (size + REF) | BARCODE (located, not decoded), each with what was read. Nothing is cut or decided here.
+PRODUCT | BRAND | DETAIL (size + REF) | BARCODE (located, not decoded), each with what was read (evidence_video.crop_items;
+10 Nov: product and maker are two crops). Nothing is cut or decided here.
 
   venv/Scripts/python.exe aipc/tasks/crop_sheet.py OUT.jpg [--title TEXT] [--cols N] RUN_JSON ...
       RUN_JSON: out/<tag>/<set>_time.json (its median run, as the videos), task3.json / live_<set>.json (every row
@@ -17,7 +18,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import evidence_video as ev  # noqa: E402
 
 FONT, AA = cv2.FONT_HERSHEY_SIMPLEX, cv2.LINE_AA
-W, ROW, LEFT = 2000, 150, 520
+W, ROW, LEFT = 2000, 170, 520
+COLS = ("PRODUCT (name read)", "BRAND (maker read)", "DETAIL: size, REF, GTIN", "BARCODE: located")
 INK, GREY, BG = (30, 30, 30), (110, 110, 110), (255, 255, 255)
 NAMES = {"t1_drive": "Task 1, Drive photo", "t1_orig": "Task 1, mentor's photo", "t2_drive": "Task 2, Drive photo"}
 
@@ -63,17 +65,17 @@ def tile(base, info, key, w, h):
 
 
 def row(label, request, pick, base, info):
-    tw = (W - LEFT) // 3
+    items = ev.crop_items(info)
+    tw = (W - LEFT) // len(items)
     out = np.full((ROW, W, 3), BG, np.uint8)
     cv2.putText(out, label, (12, 34), FONT, 0.75, INK, 2, AA)
     cv2.putText(out, ev.plain(f"\"{request}\"")[:40], (12, 72), FONT, 0.65, INK, 1, AA)
     cv2.putText(out, pick, (12, 108), FONT, 0.65, ev.GREEN, 2, AA)
-    texts = (info.get("brand_text") or "", info.get("detail_text") or "",
-             f"located, {info.get('barcode_bars') or 0} bars" if info.get("files", {}).get("barcode") else "")
-    for k, key in enumerate(("brand", "detail", "barcode")):
+    for k, (key, title, text) in enumerate(items):
         x = LEFT + k * tw
-        out[0:ROW - 30, x:x + tw] = tile(base, info, key, tw, ROW - 30)
-        ev.put_fit(out, ev.plain(texts[k]), (x + 6, ROW - 9), tw - 12, 0.55, GREY, 1)
+        out[0:ROW - 52, x:x + tw] = tile(base, info, key, tw, ROW - 52)
+        ev.put_fit(out, ev.plain(title), (x + 6, ROW - 31), tw - 12, 0.55, INK, 2)
+        ev.put_fit(out, ev.plain(text), (x + 6, ROW - 9), tw - 12, 0.5, GREY, 1)
     cv2.line(out, (0, ROW - 1), (W, ROW - 1), (215, 215, 215), 1)
     return out
 
@@ -91,14 +93,14 @@ def main():
     rows = [row(*e) for a in args for e in entries(a)]
     head = np.full((110, W, 3), BG, np.uint8)
     cv2.putText(head, title, (12, 40), FONT, 0.9, INK, 2, AA)
-    tw = (W - LEFT) // 3
-    for k, t in enumerate(("BRAND (as the OCR read it)", "DETAIL: size, REF, GTIN text", "BARCODE: bars only, located")):
+    tw = (W - LEFT) // 4
+    for k, t in enumerate(COLS):
         cv2.putText(head, t, (LEFT + k * tw + 6, 92), FONT, 0.7, GREY, 2, AA)
     per = -(-len(rows) // cols)
     blank = np.full((ROW, W, 3), BG, np.uint8)
     heads = [head] + [np.full_like(head, BG) for _ in range(cols - 1)]   # the title once, the column names on each
     for hd in heads[1:]:
-        for k, t in enumerate(("BRAND (as the OCR read it)", "DETAIL: size, REF, GTIN text", "BARCODE: bars only, located")):
+        for k, t in enumerate(COLS):
             cv2.putText(hd, t, (LEFT + k * tw + 6, 92), FONT, 0.7, GREY, 2, AA)
     columns = [np.vstack([heads[c]] + rows[c * per:(c + 1) * per] + [blank] * (per - len(rows[c * per:(c + 1) * per])))
                for c in range(cols)]

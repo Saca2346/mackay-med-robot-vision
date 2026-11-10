@@ -1,4 +1,5 @@
-"""aipc/tasks/pick_parts.py: the brand / detail / barcode crops of a PICKed box come from the tokens the OCR read."""
+"""aipc/tasks/pick_parts.py: the product / brand / detail / barcode crops of a PICKed box come from the tokens the OCR
+read (10 Nov: the product name and its maker are two crops)."""
 import pathlib
 import sys
 
@@ -19,7 +20,7 @@ def plain_box():
     return np.full((400, 100, 3), 200, np.uint8), [[10, 10], [90, 10], [90, 390], [10, 390]]
 
 
-def test_brand_and_detail_are_cut_from_the_tokens_read_and_the_ref_joins_from_another_input():
+def test_product_brand_and_detail_are_cut_from_the_tokens_read_and_the_ref_joins_from_another_input():
     label = np.full((60, 600, 3), 255, np.uint8)
     tile = np.full((40, 300, 3), 255, np.uint8)
     seen = [(label, [tok("Accuforce", 10, 10, 110, 40), tok("3.5", 150, 10, 190, 40), tok("15", 200, 10, 230, 40),
@@ -27,8 +28,9 @@ def test_brand_and_detail_are_cut_from_the_tokens_read_and_the_ref_joins_from_an
             (tile, [tok("DC-RM3515HHW", 5, 5, 200, 30)])]
     frame, poly = plain_box()
     p = pp.parts(frame, poly, seen, Request("accuforce", 3.5, 15.0))
-    assert p["brand_text"] == "Accuforce"                     # the maker's name printed far apart is not merged in
-    assert p["brand"].shape[1] < 200
+    assert p["product_text"] == "Accuforce"                   # the maker's name printed far apart is not merged in
+    assert p["product"].shape[1] < 200
+    assert p["brand_text"] == "TERUMO" and p["brand"].shape[1] < 120   # the maker: its own crop
     assert p["detail_text"] == "3.5 15 | DC-RM3515HHW"         # size and REF: two blocks of print
     assert len(p["detail_blocks"]) == 2
     assert p["barcode"] is None and p["barcode_px"] is None    # a plain grey box has no bars
@@ -45,13 +47,14 @@ def test_a_size_number_printed_elsewhere_is_looked_for_in_the_other_inputs():
     assert pp.stack(p["detail_blocks"]).shape[0] > 60
 
 
-def test_product_name_words_and_maker_next_to_them_form_one_brand_crop():
+def test_product_name_words_and_the_maker_next_to_them_are_two_crops():
     img = np.full((50, 700, 3), 255, np.uint8)
     seen = [(img, [tok("B|BRAUN", 5, 10, 90, 40), tok("SeQuent", 100, 10, 200, 40), tok("Please", 210, 10, 290, 40),
                    tok("NEO", 300, 10, 350, 40), tok("2.75", 500, 10, 560, 40)])]
     frame, poly = plain_box()
     p = pp.parts(frame, poly, seen, Request("sequent please neo", 2.75, 30.0))
-    assert p["brand_text"] == "B|BRAUN SeQuent Please NEO"
+    assert p["product_text"] == "SeQuent Please NEO" and p["product"].shape[1] < 270
+    assert p["brand_text"] == "B|BRAUN" and p["brand"].shape[1] < 110
     assert p["detail_text"] == "2.75"                          # only what was read; 30 was not read here
 
 
@@ -69,7 +72,7 @@ def test_low_confidence_or_other_product_tokens_give_no_crop():
     seen = [(img, [tok("Accuforce", 5, 5, 100, 40, conf=0.3), tok("Ryurei", 120, 5, 200, 40)])]
     frame, poly = plain_box()
     p = pp.parts(frame, poly, seen, Request("accuforce", 3.5, 15.0))
-    assert p["brand"] is None and p["brand_text"] == ""
+    assert p["product"] is None and p["product_text"] == "" and p["brand"] is None
     assert p["detail_blocks"] == [] and p["detail_text"] == ""
 
 
@@ -78,7 +81,9 @@ def test_save_writes_the_crops_and_their_texts(tmp_path):
     seen = [(img, [tok("CHROMA", 10, 10, 120, 40), tok("2.75", 200, 10, 250, 40), tok("33", 260, 10, 290, 40)])]
     frame, poly = plain_box()
     info = pp.save(str(tmp_path / "c"), pp.parts(frame, poly, seen, Request("chroma", 2.75, 33.0)))
-    assert info["files"] == {"brand": "brand.png", "detail": "detail.png", "spine": "spine.png"}
+    assert info["files"] == {"product": "product.png", "detail": "detail.png", "spine": "spine.png"}
+    assert (info["product_name"], info["brand_name"]) == ("Chroma", "Biosensors")
+    assert info["brand_from"] == "not read on this face"        # no maker read, no reader to read the box again
     assert info["barcode"] == "not found" and info["detail_text"] == "2.75 33"
     assert (tmp_path / "c" / "crops.json").exists()
 
@@ -107,13 +112,13 @@ def test_text_running_down_a_tall_input_gives_a_tight_crop_turned_across_and_a_r
                     tok("x", 15, 0, 45, 15, conf=0.6)])]
     frame, poly = plain_box()
     p = pp.parts(frame, poly, seen, Request("essential pro", 3.0, 40.0))
-    assert p["brand_text"] == "essential pro"
-    assert p["brand"].shape[1] > 3 * p["brand"].shape[0]        # turned to run across, not the whole tall spine
-    assert p["brand"].shape[1] < 260
+    assert p["product_text"] == "essential pro"
+    assert p["product"].shape[1] > 3 * p["product"].shape[0]    # turned to run across, not the whole tall spine
+    assert p["product"].shape[1] < 260
     wide = np.full((60, 600, 3), 255, np.uint8)
     seen.append((wide, [tok("essential pro", 20, 15, 220, 45)]))
     p = pp.parts(frame, poly, seen, Request("essential pro", 3.0, 40.0))
-    assert p["brand"].shape == (48, 218, 3)                      # the same name read across wins: cut as it is
+    assert p["product"].shape == (48, 218, 3)                    # the same name read across wins: cut as it is
 
 
 class _Reader:
@@ -179,3 +184,58 @@ def test_upright_first_follows_the_tokens_the_run_read():
     split = [OcrToken("33", 0.99), OcrToken("2.75", 0.99)]
     assert pp._matches(joined, "2.75 33") == pp._matches(split, "2.75 33") == 2   # a tie: left to the classifier
     assert pp._matches([OcrToken("61", 0.9)], "19") == 0 and pp._matches([OcrToken("19", 0.9)], "19") == 1
+
+
+def test_names_are_the_printed_names_and_agree_with_the_laptop_brands():
+    from src.box_verifier import BRANDS, PRODUCTS, brand_of
+    assert set(pp.NAMES) == set(PRODUCTS)
+    for key, (product, brand) in pp.NAMES.items():
+        assert pp.letters(product) == pp.letters(key)
+        assert pp.letters(brand) == pp.letters(brand_of(key)), key
+    assert pp.names("essential pro") == ("Essential Pro", "iVascular")
+    assert pp.names("sequent please neo") == ("SeQuent Please NEO", "B. Braun")
+    assert set(BRANDS)
+
+
+class _SpineReader:
+    """read_once: the maker's name across the image when the spine was turned one way, nothing the other way."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def read_once(self, img):
+        self.calls += 1
+        toks = [tok("iVascular", 20, 10, 160, 40)] if self.calls == 1 else []
+        return type("R", (), {"tokens": toks})()
+
+
+def test_a_brand_the_outline_did_not_read_is_read_on_the_box_after_the_pick(tmp_path):
+    img = np.full((60, 400, 3), 255, np.uint8)
+    seen = [(img, [tok("Angiolite", 10, 10, 120, 40), tok("2.5", 200, 10, 240, 40), tok("29", 250, 10, 290, 40)])]
+    frame, poly = plain_box()
+    p = pp.parts(frame, poly, seen, Request("angiolite", 2.5, 29.0))
+    assert p["brand"] is None
+    crop, text = pp.brand_from_spine(p["spine"], _SpineReader(), "angiolite")
+    assert text == "iVascular" and crop is not None and crop.shape[1] < 200
+    assert pp.brand_from_spine(p["spine"], None, "angiolite") == (None, "")
+
+
+class _TurnReader:
+    """read_as_is: a near reading of the maker on both turns, the upright one (a white left half here) surer."""
+
+    def read_as_is(self, img):
+        upright = img[:, : img.shape[1] // 2].mean() > img[:, img.shape[1] // 2:].mean()
+        t = tok("TERUMC", 5, 5, 100, 30)
+        t.conf = 0.92 if upright else 0.70
+        if not upright:
+            t.text = "TERUMD"
+        return type("R", (), {"tokens": [t]})()
+
+
+def test_the_brand_crop_is_shown_on_the_turn_that_reads_the_maker_surer():
+    img = np.zeros((40, 200, 3), np.uint8)
+    img[:, 100:] = 255                                         # upside down: the white half is on the right
+    out, turned = pp.upright_maker(img, _TurnReader(), "accuforce", "TERUMO")
+    assert turned and out[:, :100].mean() > out[:, 100:].mean()
+    out, turned = pp.upright_maker(out, _TurnReader(), "accuforce", "TERUMO")
+    assert not turned

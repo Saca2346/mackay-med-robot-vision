@@ -29,10 +29,12 @@ def main():
             folder = os.path.dirname(cj)
             info = json.load(open(cj, encoding="utf-8"))
             flips = []
-            if info["files"].get("brand"):
-                img, t = pp.upright(cv2.imread(os.path.join(folder, "brand.png")), reader, info["brand_text"])
-                cv2.imwrite(os.path.join(folder, "brand.png"), img)
-                flips.append(t)
+            for key in ("product", "brand"):                     # 10 Nov: product and brand are two crops
+                if info["files"].get(key):
+                    img, t = pp.upright(cv2.imread(os.path.join(folder, key + ".png")), reader,
+                                        info.get(key + "_text") or "")
+                    cv2.imwrite(os.path.join(folder, key + ".png"), img)
+                    flips.append(t)
             blocks = []
             texts = (info.get("detail_text") or "").split(" | ")
             for k, f in enumerate(sorted(glob.glob(os.path.join(folder, "detail_*.png")))):

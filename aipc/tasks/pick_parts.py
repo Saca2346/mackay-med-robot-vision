@@ -1,9 +1,14 @@
-"""PICK crops (8 Nov 2026, owner: "crop brand, detail and barcode from the box"): the brand, the detail and the barcode of
-the PICKed box, cut after its MATCH as part of the PICK (aipc_tasks.py --pick-crops 1, inside the PICK time). Display,
-the report and the arm only, never evidence: the decision is made before this runs and nothing here can change it.
+"""PICK crops (8 Nov 2026, owner: "crop brand, detail and barcode from the box"; 10 Nov, owner: the product and the brand
+are two different crops, "Essential Pro" is the product and "iVascular" its brand): the product, the brand, the detail
+and the barcode of the PICKed box, cut after its MATCH as part of the PICK (aipc_tasks.py --pick-crops 1, inside the
+PICK time). Display, the report and the arm only, never evidence: the decision is made before this runs and nothing
+here can change it.
 
-  brand    the product name as the OCR read it on the outline that gave the MATCH (tokens naming the requested product,
-           and the maker's name where it is printed next to it), cut from the very image the OCR read
+  product  the product name as the OCR read it on the outline that gave the MATCH (tokens naming the requested product
+           only), cut from the very image the OCR read; labelled with its name as printed on the boxes (NAMES)
+  brand    the maker's name ("iVascular", "TERUMO", "B|BRAUN") read on that outline, cut the same way. When that outline's
+           OCR did not read it, after the clock the straightened box is read once more for it (display only, logged as
+           such); a face that does not show it says so. Labelled with the maker's name as printed (NAMES)
   detail   the printed size (tokens holding the requested diameter / length), the REF code and the GTIN text read on
            that outline, cut from the images the OCR read; one line per block of print. A product without a size: the
            printed date read
@@ -11,15 +16,18 @@ the report and the arm only, never evidence: the decision is made before this ru
            drawn outline at the photo's full resolution. LOCATED, not decoded: barcode decoding stays off as in the
            production config. Its corners in photo px, for the scanner on the arm
 
-No OCR is run for brand and detail: they come from the reads already made (aipc_tasks records the OCR inputs and tokens
-of each outline read). Turning a crop upright for display (upright) reads it once more, after the clock has stopped.
+No OCR is run for product, brand and detail inside the clock: they come from the reads already made (aipc_tasks records
+the OCR inputs and tokens of each outline read). Turning a crop upright for display (upright) and looking for a brand
+the outline did not read (brand_from_spine) read once more, after the clock has stopped.
 """
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
 import sys
+import time
 
 import cv2
 import numpy as np
@@ -33,6 +41,22 @@ from src.box_verifier import brand_of
 _NUM = re.compile(r"(?<![\d.,])\d{1,2}(?:[.,]\d{1,2})?(?![\d.,]*\d)")
 _JOINED = re.compile(r"(?<![\d.,])(\d)[.,](\d{1,2})(\d{2})(?![\d.,]*\d)")    # "3.533" = 3.5 and 33 (size_split.py)
 MIN_CONF = 0.5
+# 10 Nov: the names the crops are labelled with, product and brand as printed on the boxes; the same names as the filled
+# inventory form of 9 Nov (Leo's Drive photos, Cath Lab form) and data/gtin_catalog.csv. Key = the request's product
+# (src/box_verifier.PRODUCTS); the brands agree with src/box_verifier.BRANDS (tests/test_aipc_pick_parts.py).
+NAMES = {"angiolite": ("Angiolite", "iVascular"), "xperience pro": ("Xperience Pro", "iVascular"),
+         "essential pro": ("Essential Pro", "iVascular"), "accuforce": ("Accuforce", "Terumo"),
+         "ultimaster nagomi": ("Ultimaster Nagomi", "Terumo"), "ryurei": ("Ryurei", "Terumo"),
+         "conqueror nc pro": ("Conqueror NC Pro", "APT Medical"), "nc emerge": ("NC Emerge", "Boston Scientific"),
+         "agent": ("Agent", "Boston Scientific"), "permanent sled bag": ("Permanent Sled Bag", "Boston Scientific"),
+         "sapphire": ("Sapphire", "OrbusNeich"), "scoreflex": ("Scoreflex", "OrbusNeich"),
+         "chroma": ("Chroma", "Biosensors"), "sequent please neo": ("SeQuent Please NEO", "B. Braun")}
+
+
+def names(product):
+    """(product name, brand name) as printed on the boxes, for a request's product key."""
+    p = (product or "").lower()
+    return NAMES.get(p, (p.title(), brand_of(p).title()))
 
 
 def letters(s):
@@ -196,16 +220,54 @@ def detail_blocks(seen, req):
 
 
 def text_parts(seen, req):
-    """Brand and detail from the OCR record of the MATCH outline (no OCR here)."""
-    brand, brand_text, _ = best_block(seen, lambda s: is_name(s, req.product), lambda s: is_maker(s, req.product))
-    if brand is None:
-        brand, brand_text, _ = best_block(seen, lambda s: is_maker(s, req.product))
+    """Product, brand and detail from the OCR record of the MATCH outline (no OCR here). Product = tokens naming the
+    product only, brand = tokens naming its maker only (until 9 Nov one "brand" crop held the product name and the maker
+    printed next to it)."""
+    product, product_text, _ = best_block(seen, lambda s: is_name(s, req.product) and not is_maker(s, req.product))
+    brand, brand_text, _ = best_block(seen, lambda s: is_maker(s, req.product))
     blocks = detail_blocks(seen, req)
     read = [[k, t.text, round(float(t.conf), 3)] for k, (_, toks) in enumerate(seen) for t in toks or []
             if t.conf >= MIN_CONF]
-    return {"brand": brand, "brand_text": brand_text, "detail_blocks": [b for b, _ in blocks],
+    return {"product_key": req.product, "product": product, "product_text": product_text,
+            "brand": brand, "brand_text": brand_text, "detail_blocks": [b for b, _ in blocks],
             "detail_texts": [t for _, t in blocks],
             "detail_text": " | ".join(t for _, t in blocks), "read": read}
+
+
+def spine_pieces(spine, short=160):
+    """The straightened box for reading the maker: the whole box and its two ends (the outer 35 % along the box, where
+    the maker's logo usually is), each scaled up so its short side is at least `short` px (the logo's letters are
+    ~15 px on a 64 px wide spine; read whole, the long box is shrunk again by the text detector)."""
+    h, w = spine.shape[:2]
+    along = 0 if h >= w else 1
+    n = spine.shape[along]
+    cut = int(round(0.35 * n))
+    pieces = [spine, spine[:cut] if along == 0 else spine[:, :cut], spine[n - cut:] if along == 0 else spine[:, n - cut:]]
+    out = []
+    for p in pieces:
+        f = max(1.0, short / max(1, min(p.shape[:2])))
+        out.append(cv2.resize(p, (int(round(p.shape[1] * f)), int(round(p.shape[0] * f))), interpolation=cv2.INTER_CUBIC)
+                   if f > 1 else p)
+    return out
+
+
+def brand_from_spine(spine, reader, product):
+    """After the clock, display only: the maker's name on the straightened box (the spine at full resolution), read
+    across each way (the print runs along the box), whole and at its two ends scaled up (spine_pieces) -> (crop, text)
+    or (None, ""). Used when the MATCH outline's OCR did not read the maker: that outline is often only the label with
+    the size."""
+    if spine is None or reader is None or not brand_of(product or "") or min(spine.shape[:2]) < 8:
+        return None, ""
+    seen = []
+    for piece in spine_pieces(spine):
+        if piece.shape[0] < piece.shape[1]:                    # print along the box runs across already
+            turns = (piece, cv2.rotate(piece, cv2.ROTATE_180))
+        else:
+            turns = (cv2.rotate(piece, cv2.ROTATE_90_COUNTERCLOCKWISE), cv2.rotate(piece, cv2.ROTATE_90_CLOCKWISE))
+        for img in turns:
+            seen.append((img, [t for t in reader.read_once(img).tokens if t.poly is not None]))
+    crop, text, _ = best_block(seen, lambda s: is_maker(s, product))
+    return crop, text
 
 
 def init_worker(code_dir):
@@ -310,14 +372,48 @@ def upright(img, reader, expect=""):
     return (turned, True) if d_turned < d_img else (img, False)
 
 
+def upright_maker(img, reader, product, expect=""):
+    """Display only, the brand crop (10 Nov): one short word, the maker's name, which the OCR often reads on both turns
+    ("TERUMD" upside down, "TERUMC" upright, Accuforce K21 of the 20-box recording), so upright()'s token count ties
+    and its classifier vote can go wrong. Both turns are read with the direction classifier off; the turn whose maker
+    token reads with the higher confidence wins (the only one that reads it, if one); neither reads it: upright()."""
+    if img is None or reader is None or min(img.shape[:2]) < 8:
+        return img, False
+    turned = cv2.rotate(img, cv2.ROTATE_180)
+    maker = letters(brand_of(product or ""))
+
+    def near(text):          # the maker's name or a near reading of it, either turn ("TERUMD", "TERUMC", "BIOSENSO")
+        t = letters(text)
+        return is_maker(text, product) or (len(t) >= 5 and bool(maker) and
+                                           difflib.SequenceMatcher(None, t, maker).ratio() >= 0.75)
+    best = {}
+    for k, x in (("img", img), ("turned", turned)):
+        confs = [float(t.conf or 0) for t in reader.read_as_is(x).tokens if near(t.text)]
+        if confs:
+            best[k] = max(confs)
+    if best:
+        return (turned, True) if best.get("turned", -1) > best.get("img", -1) else (img, False)
+    return upright(img, reader, expect)
+
+
 def save(folder, p, reader=None):
-    """After the clock: the crops as PNG files (brand / detail turned upright for display) and their texts -> dict for
-    the run log."""
+    """After the clock: the crops as PNG files (product / brand / detail turned upright for display), their texts and
+    the names they are labelled with -> dict for the run log. Brand not read on the MATCH outline: brand_from_spine."""
     os.makedirs(folder, exist_ok=True)
-    info = {"brand_text": p["brand_text"], "detail_text": p["detail_text"],
+    product_name, brand_name = names(p.get("product_key"))
+    brand, brand_text, brand_from = p.get("brand"), p.get("brand_text") or "", "outline read"
+    if brand is None:                    # not read on the MATCH outline: the straightened box read once, after the clock
+        t0 = time.perf_counter()
+        brand, brand_text = brand_from_spine(p.get("spine"), reader, p.get("product_key"))
+        brand_from = "box read after the PICK" if brand is not None else "not read on this face"
+        brand_s = round(time.perf_counter() - t0, 3)
+    info = {"product_name": product_name, "brand_name": brand_name, "product_text": p.get("product_text") or "",
+            "brand_text": brand_text, "brand_from": brand_from, "detail_text": p["detail_text"],
             "barcode": "located (not decoded)" if p["barcode"] is not None else "not found",
             "barcode_px": p["barcode_px"], "barcode_bars": p["barcode_bars"], "files": {},
             "read": p.get("read", [])}               # every token (>= 0.5) the MATCH outline's OCR read: [input, text, conf]
+    if brand_from != "outline read":
+        info["brand_read_s"] = brand_s                     # outside the PICK time
     blocks = []
     texts = p.get("detail_texts") or [""] * len(p.get("detail_blocks") or [])
     for k, (b, t) in enumerate(zip(p.get("detail_blocks") or [], texts), 1):   # each block of print upright on its own
@@ -325,13 +421,15 @@ def save(folder, p, reader=None):
         blocks.append(img)
         info["detail_turned"] = info.get("detail_turned", False) or turned
         cv2.imwrite(os.path.join(folder, f"detail_{k}.png"), img)
-    imgs = {"brand": p.get("brand"), "detail": stack(blocks) if blocks else None, "barcode": p.get("barcode"),
-            "spine": p.get("spine")}
+    imgs = {"product": p.get("product"), "brand": brand, "detail": stack(blocks) if blocks else None,
+            "barcode": p.get("barcode"), "spine": p.get("spine")}
     for k, img in imgs.items():
         if img is None or not img.size:
             continue
         if k == "brand":
-            img, info["brand_turned"] = upright(img, reader, p["brand_text"])
+            img, info["brand_turned"] = upright_maker(img, reader, p.get("product_key"), brand_text)
+        elif k == "product":
+            img, info["product_turned"] = upright(img, reader, info["product_text"])
         cv2.imwrite(os.path.join(folder, k + ".png"), img)
         info["files"][k] = k + ".png"
     with open(os.path.join(folder, "crops.json"), "w") as f:

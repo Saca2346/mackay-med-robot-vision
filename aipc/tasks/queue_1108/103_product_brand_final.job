@@ -1,0 +1,22 @@
+# 10 Nov: the final runs again with the product / brand crops (owner approved the example ex1110_drive). Same flags as job 102;
+# decisions must equal fqzf* (job 102). Brand not read on the MATCH outline is read on the box after the PICK (display only).
+# Tags fqzg*.
+export OCR_ALGO=HEURISTIC
+FB="--imgsz 544x960 --workers 27 --cls-cpu 1 --proc-threads 1 --order skim --snap 1 --refine 1 --refine-device cuda --draw-imgsz 1280 --variants 1 --lazy 1 --ordered-prefetch 1 --priority 1 --refine-webcam 0 --webcam-ends 1"
+OZ="--views $VB --alt-views 1 --alt-lazy 1 --skim-name 1 $R --par-variants 1"
+quiet=0
+while [ $quiet -lt 6 ]; do
+  u=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | tr -d " ")
+  if [ "$u" -lt 30 ]; then quiet=$((quiet+1)); else quiet=0; fi
+  sleep 10
+done
+echo "GPU quiet $(date +%T) load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzg 2400 time t1_drive t1_orig t2_drive --runs 5 $FB $OZ --pick-crops 1 --procs 24
+echo "load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzg_t3 2400 task3 $FB $OZ --pick-crops 1 --procs 20 --claude-slots 1
+echo "load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzg_live 3600 live $S $FB $OZ --pick-crops 1 --procs 20
+echo "load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzg_drive 2400 drive $FB $OZ --pick-crops 1 --drive-outlines 1 --procs 20
+echo "load $(cut -d' ' -f1-3 /proc/loadavg)"
+unset OCR_ALGO

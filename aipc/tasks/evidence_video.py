@@ -46,10 +46,32 @@ def plain(s):
     return (s or "").replace("®", "(R)").replace("™", "(TM)").encode("ascii", "ignore").decode()
 
 
+def crop_items(info):
+    """The crops of a PICK as (file key, title, what was read): PRODUCT | BRAND | DETAIL | BARCODE (10 Nov, owner: the
+    product and its maker are two crops, labelled with their names as printed on the boxes). A log from before 10 Nov
+    has one "brand" crop that holds the product name: shown as PRODUCT, with no brand crop."""
+    files = info.get("files", {})
+    bars = info.get("barcode_bars") or 0
+    if "product_name" in info:
+        how = info.get("brand_from", "")
+        read = info.get("brand_text") or ""
+        first = (("product", f"PRODUCT: {info['product_name']}",
+                  f"read: {info.get('product_text')}" if info.get("product_text") else "name not read on this face"),
+                 ("brand", f"BRAND: {info.get('brand_name') or '?'}",
+                  (f"read: {read}" + (" (box re-read after PICK)" if how.startswith("box") else "")) if read
+                  else "maker not read on this face"))
+    else:
+        first = (("brand", "PRODUCT (as the OCR read it)", info.get("brand_text") or "not read"),
+                 ("none", "BRAND", "not cut (run before 10 Nov)"))
+    return first + (("detail", "DETAIL: size, REF, GTIN text", info.get("detail_text") or "not read"),
+                    ("barcode", "BARCODE: located, not decoded",
+                     f"bars only, {bars} bars" if files.get("barcode") else "not found"))
+
+
 def crop_tile(base, info, key, title, text, tw, th, u, bg):
     """One tile of the crops strip: title, the crop (scaled to fit, green frame), what was read under it."""
     out = np.full((th, tw, 3), bg, np.uint8)
-    cv2.putText(out, title, (int(14 * u), int(30 * u)), FONT, 0.62 * u, (200, 200, 200), max(1, int(1.5 * u)), AA)
+    put_fit(out, title, (int(14 * u), int(30 * u)), tw - int(28 * u), 0.62 * u, (200, 200, 200), max(1, int(1.5 * u)))
     f = info.get("files", {}).get(key)
     img = cv2.imread(str(base / info["dir"] / f)) if f else None
     bw, bh = tw - int(28 * u), th - int(88 * u)
@@ -78,8 +100,8 @@ def put_fit(img, text, org, width, scale, colour, thick):
 
 
 def crops_strip(base, info, width, bg=(29, 30, 34), stacked=False):
-    """The PICK's crops (aipc_tasks.py --pick-crops 1, pick_parts.py) as three tiles, BRAND | DETAIL | BARCODE, each
-    with what was read under it. info = the log's "crops" (None: the strip says no box was cut); base = the folder of
+    """The PICK's crops (aipc_tasks.py --pick-crops 1, pick_parts.py) as four tiles, PRODUCT | BRAND | DETAIL | BARCODE
+    (crop_items), each with what was read under it. info = the log's "crops" (None: the strip says no box was cut); base = the folder of
     the run log. Sizes for a 1280 px wide strip, scaled to `width`; stacked: the three tiles one under the other, each
     as wide as the strip (under a portrait photo)."""
     u = width / 1280
@@ -88,15 +110,11 @@ def crops_strip(base, info, width, bg=(29, 30, 34), stacked=False):
         cv2.putText(out, "no PICK: no box cut", (int(16 * u), int(40 * u)), FONT, 0.7 * u, (170, 170, 170),
                     max(1, int(2 * u)), AA)
         return out
-    files = info.get("files", {})
-    bars = info.get("barcode_bars") or 0
-    tiles = (("brand", "BRAND (as the OCR read it)", info.get("brand_text") or "not read"),
-             ("detail", "DETAIL: size, REF, GTIN text (OCR)", info.get("detail_text") or "not read"),
-             ("barcode", "BARCODE: located, not decoded", f"bars only, {bars} bars" if files.get("barcode") else "not found"))
+    tiles = crop_items(info)
     if stacked:
         u = width / 426                                  # a tile as wide as one third of a 1280 px strip, scaled up
         return np.vstack([crop_tile(base, info, *t, width, int(180 * u), u, bg) for t in tiles])
-    tw = width // 3
+    tw = width // len(tiles)
     out = np.hstack([crop_tile(base, info, *t, tw, int(STRIP_H * u), u, bg) for t in tiles])
     return cv2.copyMakeBorder(out, 0, 0, 0, width - out.shape[1], cv2.BORDER_CONSTANT, value=bg)
 
@@ -202,7 +220,7 @@ def frames(photo, run, text, slow, hold, label="", cdir=None):
             if (pick and t >= pick[0]) or (not pick and t >= t_end):
                 img[y:y + strip.shape[0]] = strip
             else:
-                cv2.putText(img, "brand / detail / barcode: cut from the box when it is PICKed", (16, y + 40),
+                cv2.putText(img, "product / brand / detail / barcode: cut from the box when it is PICKed", (16, y + 40),
                             FONT, 0.7, (150, 150, 150), 2, AA)
         cv2.rectangle(img, (0, 0), (W, BAR), (29, 30, 34), -1)
         put_fit(img, plain(text), (16, 36), W - 380, 0.9, (255, 255, 255), 2)   # never under the clock (8 Nov)
