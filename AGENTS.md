@@ -6,6 +6,9 @@ Project: vision module of the Mackay / NSTC medicine-box robot. A camera (RealSe
 ## Safety rules (never change without the project owner's written decision)
 
 1. **MATCH / PICK needs two independent sources** (e.g. size text + REF, or barcode). One source = candidate. Do not relax it.
+   One owner exception (decided by the owner on 24 Oct, barcode OFF): a request for a box without a size (Permanent Sled Bag) WITH a date counts the
+   product name + the printed date that equals the requested date as two sources (`printed_date_agrees`, `src/box_verifier.py`); the strict date gate still applies.
+   A request without a date, a wrong date, or any sized product is unchanged.
 2. A request for a dated box (`... 2029-03-24`) may only PICK after that printed date was read (`src/box_verifier.py`, `REQUIRED_EXPIRY`).
 3. Never mark inventory rows verified or taken on the user's behalf; tests use a copy of `data/rak/inventaris.csv`.
 4. Never create new detection classes or put product names in class / label files.

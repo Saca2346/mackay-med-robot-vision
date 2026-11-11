@@ -50,6 +50,8 @@ class InvBox:
     order: int = 0                                # urutan kiri -> kanan saat dipindai (petunjuk, bukan kunci)
     thumb: str = ""                               # gambar punggung (relatif ke folder inventaris)
     sig: str = ""                                 # ciri tampilan (angka dipisah spasi)
+    pos: str = ""                                 # shelf map (rak_inventaris.py peta): "x y w" of the spine centre and
+                                                  # width as fractions of the camera frame (target lock, box_lock.py)
     checked_by: str = ""
     checked_at: str = ""
     taken_at: str = ""

@@ -1,0 +1,4 @@
+# final accuracy config (8 Nov): detector 1280 first, 544x960 adds the boxes it missed, the other view's outline of the
+# same box read as extra outlines (--alt-views 1), joined sizes split, size from the spine
+run dr_final 5400 drive --imgsz 544x960 $F --views $VB --alt-views 1 $R --procs 16
+run lm_final 3600 live $S --imgsz 544x960 $F --views $VB --alt-views 1 $R --procs 20

@@ -79,8 +79,11 @@ def predict(weights_for, images, args, label_dir):
                           device=args.device, verbose=False)[0]
         lines = []
         for xy, c, s in zip(r.obb.xyxyxyxyn.cpu().numpy(), r.obb.cls.cpu().numpy(), r.obb.conf.cpu().numpy()):
-            if s >= conf[int(c)]:
-                lines.append(f"{int(c)} " + " ".join(f"{v:.6f}" for v in xy.reshape(-1)))
+            cls = int(c)
+            # This identity evaluation uses boxes and size panels. A three-class
+            # detector also returns expiry regions, which are evaluated separately.
+            if cls in conf and s >= conf[cls]:
+                lines.append(f"{cls} " + " ".join(f"{v:.6f}" for v in xy.reshape(-1)))
         (label_dir / f"{photo}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

@@ -145,3 +145,69 @@ def test_parse_request_rejects_unclear_requests():
                 "angiolite 29 x 2.5"):                # tertukar: diameter 29 mm tidak masuk akal
         with pytest.raises(ValueError):
             parse_request(bad)
+
+
+def test_mentor_task_requests_are_understood():
+    from src.box_verifier import parse_request
+    r = parse_request("Braun, DCB, 2.75mm, 30mm")
+    assert (r.product, r.diameter, r.length) == ("sequent please neo", 2.75, 30.0)
+    r = parse_request("Chroma, 2.75 , 33")
+    assert (r.product, r.diameter, r.length) == ("chroma", 2.75, 33.0)
+    r = parse_request("b braun sequent please neo 3.5 x 20")
+    assert (r.product, r.diameter, r.length) == ("sequent please neo", 3.5, 20.0)
+
+
+# ---- owner decision 24-10: Permanent Sled Bag, barcode OFF: name + the REQUESTED printed date = two sources
+def _sled(date_text=None, name="Permanent Sled Bag"):
+    import datetime as dt
+    from src.box_verifier import Evidence
+    ident = parse_identity(toks(name), CATALOG + ["permanent sled bag"])
+    dates = (dt.date.fromisoformat(date_text),) if date_text else ()
+    return Evidence(text=ident, dates=dates)
+
+
+def test_sled_bag_name_plus_requested_date_is_a_match():
+    import datetime as dt
+    from src.box_verifier import combined_score, decide_multi, support
+    req = Request("permanent sled bag", expiry=dt.date(2029, 3, 24))
+    d, reason, _ = decide_multi(_sled("2029-03-24"), req)
+    assert d == MATCH and "printed date" in reason
+    atoms, contra = support(_sled("2029-03-24"), req)
+    assert not contra and {"tp", "pd"} <= atoms and combined_score(atoms)[0] == 2
+
+
+def test_sled_bag_stays_one_source_without_the_requested_date():
+    import datetime as dt
+    from src.box_verifier import CANDIDATE, combined_score, decide_multi, support
+    req = Request("permanent sled bag", expiry=dt.date(2029, 3, 24))
+    for ev in (_sled("2029-03-12"), _sled(None)):                       # another box's date, or no date read
+        assert decide_multi(ev, req)[0] == CANDIDATE
+        assert combined_score(support(ev, req)[0])[0] == 1
+    undated = Request("permanent sled bag")                              # no date in the request: still one source
+    assert decide_multi(_sled("2029-03-24"), undated)[0] == CANDIDATE
+
+
+def test_the_date_exception_is_only_for_boxes_without_a_size():
+    import datetime as dt
+    from src.box_verifier import Evidence, decide_multi, printed_date_agrees
+    ident = parse_identity(toks("Angiolite", "2.5", "29"), CATALOG)
+    req = Request("angiolite", 2.5, 29.0, expiry=dt.date(2028, 7, 31))
+    ev = Evidence(text=ident, dates=(dt.date(2028, 7, 31),))
+    assert not printed_date_agrees(ev, req)
+    assert decide_multi(ev, req)[0] != MATCH or "printed date" not in decide_multi(ev, req)[1]
+
+
+def test_sled_bag_date_still_goes_through_the_strict_date_gate(monkeypatch):
+    import datetime as dt
+    from src.box_verifier import CANDIDATE, decide_multi, support
+    req = Request("permanent sled bag", expiry=dt.date(2029, 3, 24))
+    monkeypatch.setattr("src.box_verifier.REQUIRED_EXPIRY", req.expiry)
+    st = TrackState()
+    for _ in range(2):
+        ev = _sled("2029-03-24")
+        d, _, key, sup = decide_multi(ev, req)[0], None, decide_multi(ev, req)[2], support(ev, req)
+        st.add(d, key, sup, ev)
+    st.expiry = None                                                     # the date was read but not accepted as this box's date
+    assert st.stable(2) == CANDIDATE
+    st.expiry = req.expiry
+    assert st.stable(2) == MATCH

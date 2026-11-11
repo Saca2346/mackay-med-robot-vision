@@ -18,11 +18,16 @@ import numpy as np
 from src.box_barcode import decode_gs1, find_gtins_in_text
 from src.box_expiry import find_dates
 from src.box_geometry import to_poly, warp_upright
-from src.box_ref import parse_refs
+from src.box_ref import parse_ref_hints, parse_refs
 from src.box_verifier import (CANDIDATE, CONFIRM, Evidence, Identity, _find_product, decide_multi, parse_identity,
                               support)
 
 OCR_MAX_SIDE = 160     # sisi pendek crop untuk OCR paling besar segini (foto 12 MP -> jauh lebih cepat)
+# Whole-spine OCR of a narrow spine: enlarged first (FULL_BOX_UPSCALE, short side at most OCR_MAX_SIDE). The REF line
+# is the smallest print on the box. Chosen 15-10 on the 32 NON-target boxes of the two task photos (the targets are
+# the test): correct REF 9/32 at 1x; 13/32 at 1.5x, 2x, 2.5x, 3x; wrong REF 0, 1, 2 and 0 for 1.5x / 2x / 2.5x / 3x.
+FULL_BOX_UPSCALE_BELOW = 140
+FULL_BOX_UPSCALE = 1.5
 
 
 def box_width_px(poly) -> float:
@@ -145,27 +150,48 @@ def _worth_flip(ident, tokens, req) -> bool:
     return not ident.product_ok and not refs and (ident.diameter_ok or ident.length_ok)
 
 
-def gather(sl_crops, box_crop, reader, cfg: dict, req=None) -> tuple[Evidence, int]:
+def bright_label_crops(crops, min_bright: float = 0.15, bright_level: int = 170):
+    """Terumo boxes: the detector also returns the dark TERUMO logo block as a second size_label and every orientation of
+    it is read for nothing (webcam 23-10: logo 180 x 55 px, 5-7% bright pixels; the real label 380 x 58 px, 35-40%).
+    Drop crops that are mostly dark ONLY when another crop is clearly bright; never drop all of them (a dark exposure
+    such as the D455's keeps every crop). Pixel selection only: nothing is read from, or filled by, the request."""
+    if len(crops) < 2:
+        return crops
+    share = [float((cv2.cvtColor(c, cv2.COLOR_BGR2GRAY) > bright_level).mean()) if c is not None and c.size else 0.0
+             for c in crops]
+    if max(share) < min_bright:
+        return crops
+    return [c for c, s in zip(crops, share) if s >= min_bright]
+
+
+def gather(sl_crops, box_crop, reader, cfg: dict, req=None, *, visual=False) -> tuple[Evidence, int]:
     """Barcode di crop punggung + OCR crop size_label -> (Evidence, jumlah pembacaan OCR).
     Teks dibaca dulu dalam arah punggung (nama produk & ukuran kebanyakan merek); kalau belum lengkap, juga
     melintang (angka Ultimaster Nagomi dicetak melintang). Dengan `req`: nama produk LAIN sudah terbaca yakin di
     arah punggung -> arah melintang dilewati (kotak itu sudah pasti bukan target; hemat ~0,1 s CPU per kotak)."""
-    codes = decode_gs1(box_crop, hard=True) if box_crop is not None else []
+    if (req is not None and req.product in TERUMO_LABEL_BAND
+            and cfg.get("verify", {}).get("skip_dark_label_crops", False)):
+        sl_crops = bright_label_crops(sl_crops)
+    codes = (decode_gs1(box_crop, hard=True) if box_crop is not None and not visual
+             and cfg.get("verify", {}).get("decode_barcodes", True) else [])
     min_conf = cfg["ocr"]["min_confidence"]
     parse = lambda toks: parse_identity(toks, cfg["catalog"], min_conf,
                                         tuple(cfg["matching"]["diameter_range_mm"]),
                                         tuple(cfg["matching"]["length_range_mm"]))
     ta = [t for c in sl_crops for t in reader.read_orient(c, _rot(c, _ALONG)).tokens]
     ident, tokens, n = parse(ta), list(ta), len(sl_crops)
+    # Visual tracking can use a complete REF already in this label. Extra
+    # orientations to obtain another source belong to the verified workflow.
+    resolved = lambda: _complete(ident) or (visual and bool(parse_refs(" ".join(t.text for t in tokens))))
     other = req is not None and ident.product_ok and ident.product and ident.product != req.product
     tb = []
-    if sl_crops and not _complete(ident) and not other:
+    if sl_crops and not resolved() and not other:
         tb = [t for c in sl_crops for t in reader.read_orient(c, _rot(c, _ACROSS)).tokens]
         n += len(sl_crops)
         if tb:
             ident = _combine(ident, parse(tb), ta, tb, min_conf) if ta else parse(tb)
             tokens += tb
-    if sl_crops and tokens and not _complete(ident) and not other and _worth_flip(ident, tokens, req):
+    if sl_crops and tokens and not resolved() and not other and _worth_flip(ident, tokens, req):
         # kotak yang ditaruh TERBALIK (180 derajat): classifier arah RapidOCR membalik baris panjang (REF, tanggal)
         # tapi tidak angka pendek. Uji tripod 30-09: "2,5" dan "29" terbaca "25 29" / "62 55"; diputar 180 derajat
         # terbaca "angiolite 2.5 29" (0,99-1,00). Hanya kalau arah biasa sudah membaca sesuatu tapi belum lengkap:
@@ -186,27 +212,84 @@ def gather(sl_crops, box_crop, reader, cfg: dict, req=None) -> tuple[Evidence, i
             else:
                 continue
             tokens += tf
-            if _complete(ident):
+            if resolved():
                 break
     text = " ".join(t.text for t in tokens)
-    ev = Evidence(text=ident if tokens else None, refs=parse_refs(text), codes=list(codes))
+    ev = Evidence(text=ident if tokens else None, refs=parse_refs(text), codes=list(codes),
+                  ref_hints=parse_ref_hints(text))
     _merge_codes(ev, find_gtins_in_text(text))
+    if visual:
+        ev.dates = tuple(find_dates(text))
     return ev, n
 
 
-def gather_full_box(ev: Evidence, box_crop, reader, cfg: dict | None = None) -> tuple[int, str]:
+TERUMO_LABEL_BAND = ("accuforce", "ryurei", "ultimaster nagomi")   # white label between two dark brand blocks
+
+
+def label_band(strip: np.ndarray, pad: float = 0.05, min_fraction: float = 0.25):
+    """The white label of a horizontal Terumo spine strip: the longest bright run of the column brightness (Otsu) between
+    the two dark brand blocks, padded. Selects pixels only; every value still comes from OCR. None when no clear label.
+    23-10, webcam, 69 real Accuforce crops: the correct REF is read in 53 of 69 with this band at 1.5x, 44 of 69 with the
+    whole spine at 1.5x (0 wrong REF in both)."""
+    if strip is None or strip.ndim != 3 or strip.shape[1] < 2 * strip.shape[0]:
+        return None
+    column = cv2.GaussianBlur(cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY).astype(np.float32).mean(axis=0).reshape(1, -1),
+                              (0, 0), sigmaX=6).ravel()
+    if float(np.ptp(column)) < 40:                  # no dark brand blocks next to a bright label
+        return None
+    threshold, _ = cv2.threshold(column.astype(np.uint8).reshape(1, -1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    best, start = (0, 0), None
+    for i, bright in enumerate(list(column > threshold) + [False]):
+        if bright and start is None:
+            start = i
+        elif not bright and start is not None:
+            best = (start, i) if i - start > best[1] - best[0] else best
+            start = None
+    if best[1] - best[0] < min_fraction * strip.shape[1]:
+        return None
+    margin = int(pad * strip.shape[1])
+    return strip[:, max(0, best[0] - margin):min(strip.shape[1], best[1] + margin)]
+
+
+def _spine_tokens(img, reader, cfg):
+    """OCR tokens of a spine strip: enlarged while narrow, cut into overlapping tiles when long. -> (tokens, reads)."""
+    short = min(img.shape[:2])
+    if short < FULL_BOX_UPSCALE_BELOW:
+        up = (cfg or {}).get("verify", {}).get("full_box_upscale", FULL_BOX_UPSCALE)   # 1.0 = behaviour before 15-10
+        f = min(up, OCR_MAX_SIDE / short)
+        spine = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_CUBIC)
+    else:
+        spine = _cap(img)
+    tokens, n = [], 0
+    for tile in _tiles(spine):
+        tokens += reader.read_once(tile).tokens
+        n += 1
+    return tokens, n
+
+
+def gather_full_box(ev: Evidence, box_crop, reader, cfg: dict | None = None, product: str | None = None) -> tuple[int, str]:
     """Tambahkan kode REF / teks GTIN dari OCR seluruh punggung, dan nama produk kalau crop size_label tidak
     memuatnya (nama Accuforce / angiolite sering di luar size_label). Nama di punggung yang BERBEDA dari nama di
-    size_label membuat produk teks ambigu (tidak dipakai). -> (jumlah crop OCR, teks)."""
-    more, n = [], 0
-    for tile in _tiles(_cap(box_crop)):
-        more += reader.read_once(tile).tokens
-        n += 1
+    size_label membuat produk teks ambigu (tidak dipakai). -> (jumlah crop OCR, teks).
+
+    verify.full_box_label_band (default off) with a Terumo `product`: the white label band is read first; when that read
+    gives no product name and the size label gave none either, the whole spine is read as before."""
+    band = None
+    if (cfg is not None and product in TERUMO_LABEL_BAND and cfg.get("verify", {}).get("full_box_label_band", False)
+            and min(box_crop.shape[:2]) < FULL_BOX_UPSCALE_BELOW):
+        band = label_band(box_crop)
+    more, n = _spine_tokens(band if band is not None else box_crop, reader, cfg)
+    if band is not None:
+        prod, ok, _ = _find_product(more, cfg["catalog"], cfg["ocr"]["min_confidence"])
+        if not ok and not (ev.text is not None and ev.text.product_ok):
+            full, extra_reads = _spine_tokens(box_crop, reader, cfg)      # the name sits on a dark block outside the band
+            more, n = more + full, n + extra_reads
     extra = " ".join(t.text for t in more)
     ev.spine = extra
     ev.dates = tuple(find_dates(extra))
     known ={(h.product, h.diameter, h.length) for h in ev.refs}
     ev.refs += [h for h in parse_refs(extra) if (h.product, h.diameter, h.length) not in known]
+    ev.ref_hints += parse_ref_hints(extra)
     _merge_codes(ev, find_gtins_in_text(extra))
     if cfg is not None and more:
         prod, ok, _ = _find_product(more, cfg["catalog"], cfg["ocr"]["min_confidence"])
@@ -261,7 +344,7 @@ def read_evidence(sl_crops, box_crop, too_far, reader, cfg: dict, req, catalog=N
     d, r, k = decide_multi(ev, req, **kw)
     near = box_crop is not None and min(box_crop.shape[:2]) >= v.get("full_box_min_width_px", 40)
     if d in (CANDIDATE, CONFIRM) and v.get("ocr_full_box", True) and near:
-        n += gather_full_box(ev, box_crop, reader, cfg)[0]
+        n += gather_full_box(ev, box_crop, reader, cfg, product=req.product)[0]
         d, r, k = decide_multi(ev, req, **kw)
     ev.support = support(ev, req, catalog, trust_unverified=kw["trust_unverified"])   # untuk bukti gabungan
     return ev, d, r, k, (time.perf_counter() - t0) * 1000.0, n

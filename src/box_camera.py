@@ -39,6 +39,11 @@ def _open(index: int, width: int, height: int, fps: float, backend: str, fourcc:
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     if fps:
         cap.set(cv2.CAP_PROP_FPS, fps)
+    if fourcc and str(backend).lower() == "dshow":
+        # DirectShow can reset the stream to YUY2 while negotiating size/FPS.
+        # Reapply the requested codec last: C930e 1080p is ~5 FPS in YUY2,
+        # versus the requested 20 FPS in MJPG (measured 21 October 2026).
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
     return cap
 
 
@@ -130,6 +135,10 @@ class RealSenseCamera:
         self.retries = retries
         self.reconnects = 0
         self.pipeline = None
+        # optional depth (camera.depth: true / test_webcam_box --depth): aligned to the colour image, for grasp data
+        self.depth_on = bool(self.cfg.get("depth", False))
+        self.align, self.depth_scale, self.intrinsics = None, 0.001, None
+        self._depth_ring: list = []                   # [(colour frame array, depth in metres)], newest last
         self._start()
 
     def _begin(self, width: int, height: int, fps: int) -> None:
@@ -137,8 +146,19 @@ class RealSenseCamera:
         if self.cfg.get("serial"):
             rs_cfg.enable_device(str(self.cfg["serial"]))
         rs_cfg.enable_stream(self.rs.stream.color, width, height, self.rs.format.bgr8, fps)
+        if self.depth_on:
+            # D455 depth: 1280x720 (USB 3); the depth image is aligned to the colour image below
+            rs_cfg.enable_stream(self.rs.stream.depth, 1280, 720, self.rs.format.z16, fps)
         self.pipeline = self.rs.pipeline()
-        self.pipeline.start(rs_cfg)
+        prof = self.pipeline.start(rs_cfg)
+        try:                                          # colour intrinsics: pixel -> 3D for the grasp data
+            vp = prof.get_stream(self.rs.stream.color).as_video_stream_profile().get_intrinsics()
+            self.intrinsics = {"fx": vp.fx, "fy": vp.fy, "cx": vp.ppx, "cy": vp.ppy, "width": vp.width, "height": vp.height}
+        except Exception:
+            self.intrinsics = None
+        if self.depth_on:
+            self.depth_scale = prof.get_device().first_depth_sensor().get_depth_scale()
+            self.align = self.rs.align(self.rs.stream.color)
 
     def color_profiles(self) -> set[tuple[int, int, int]]:
         """Profil warna yang ditawarkan kamera: {(lebar, tinggi, fps)}. Bergantung model dan jenis USB (USB 2 jauh
@@ -183,9 +203,17 @@ class RealSenseCamera:
             if self.pipeline is not None:
                 try:
                     frames = self.pipeline.wait_for_frames(5000)
+                    if self.align is not None:
+                        frames = self.align.process(frames)
                     color = frames.get_color_frame()
                     if color:
-                        return True, np.asanyarray(color.get_data())
+                        img = np.asanyarray(color.get_data()).copy()
+                        if self.align is not None:
+                            d = frames.get_depth_frame()
+                            if d:
+                                depth = np.asanyarray(d.get_data()).astype(np.float32) * self.depth_scale
+                                self._depth_ring = (self._depth_ring + [(img, depth)])[-4:]
+                        return True, img
                 except Exception:
                     pass
             if attempt == self.retries:
@@ -201,7 +229,18 @@ class RealSenseCamera:
                 self.pipeline = None
         return False, None
 
+    def depth_for(self, frame):
+        """Aligned depth for exactly this colour frame, or None if its pair is unavailable."""
+        ring = list(self._depth_ring)
+        for img, depth in reversed(ring):
+            if img is frame:
+                return depth
+        return None
+
     def release(self) -> None:
+        self._depth_ring = []
+        self.intrinsics = None
+        self.align = None
         if self.pipeline is not None:
             try:
                 self.pipeline.stop()

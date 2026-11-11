@@ -1,0 +1,17 @@
+# 10 Nov: same-load A/B of the PICK crops code, Tasks 1 and 2 (time mode, 5 runs): 8 Nov pick_parts (one "brand" crop that
+# held the product name, pick_parts_1108.py) against 10 Nov pick_parts (product + brand), alternated twice. Flags as job 103.
+export OCR_ALGO=HEURISTIC
+FB="--imgsz 544x960 --workers 27 --cls-cpu 1 --proc-threads 1 --order skim --snap 1 --refine 1 --refine-device cuda --draw-imgsz 1280 --variants 1 --lazy 1 --ordered-prefetch 1 --priority 1 --refine-webcam 0 --webcam-ends 1"
+OZ="--views $VB --alt-views 1 --alt-lazy 1 --skim-name 1 $R --par-variants 1"
+cp pick_parts.py pick_parts_1110.py
+for k in 1 2; do
+  cp pick_parts_1108.py pick_parts.py
+  echo "load $(cut -d" " -f1-3 /proc/loadavg) old $(md5sum < pick_parts.py | cut -c1-8)"
+  run fqzab_o$k 1200 time t1_drive t1_orig t2_drive --runs 5 $FB $OZ --pick-crops 1 --procs 24
+  cp pick_parts_1110.py pick_parts.py
+  echo "load $(cut -d" " -f1-3 /proc/loadavg) new $(md5sum < pick_parts.py | cut -c1-8)"
+  run fqzab_n$k 1200 time t1_drive t1_orig t2_drive --runs 5 $FB $OZ --pick-crops 1 --procs 24
+done
+cp pick_parts_1110.py pick_parts.py
+echo "restored $(md5sum < pick_parts.py | cut -c1-8)"
+unset OCR_ALGO

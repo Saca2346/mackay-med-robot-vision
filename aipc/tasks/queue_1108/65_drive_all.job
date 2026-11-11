@@ -1,0 +1,4 @@
+# Leo's Drive photos again with the discovery reading every outline the reader reads (--drive-outlines 1): before
+# (544 only, no reading options) and final
+run dr_base2 1800 drive --imgsz 544x960 $F --drive-outlines 1 --procs 16
+run dr_final2 1800 drive --imgsz 544x960 $F --views $VB --alt-views 1 $R --drive-outlines 1 --procs 16

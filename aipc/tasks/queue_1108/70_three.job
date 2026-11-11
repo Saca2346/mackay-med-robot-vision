@@ -1,0 +1,5 @@
+# a third view: YOLO12s trained without the 28-Sep photos, at 1600 px (the only detector that found the Elutax 3 boxes)
+V3="B:1280:0+B:544x960:0+../det/runs/yolo12s-obb_1280_hold/weights/last.pt:1600:0"
+run rd_v3 900 score t1_drive t2_drive t1_orig --imgsz 544x960 $F --views $V3 --alt-views 1 $R --procs 20
+run rd_v3_t3 1500 task3 --imgsz 544x960 $F --views $V3 --alt-views 1 $R --procs 20 --claude-slots 1
+run dr_v3 5400 drive --imgsz 544x960 $F --views $V3 --alt-views 1 $R --drive-outlines 1 --procs 16

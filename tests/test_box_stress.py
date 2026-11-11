@@ -100,3 +100,17 @@ def test_until_taken_item_ends_only_when_the_box_is_taken(tmp_path):
     assert s.check(25.1, "DONE", None) == "TAKEN"
     row = s.finish_item(25.1, "TAKEN", {}, 20)
     assert row["kotak"] == 3 and row["detik"] == "10.0" and "found 1/1" in s.status(26.0)
+
+
+def test_until_taken_box_found_but_not_taken_is_not_a_plain_timeout(tmp_path):
+    # 15-10 menu 9: essential pro PICK after 5 s, box not taken -> the table said TIMEOUT and lost the PICK
+    from src.box_stress import PICK_NOT_TAKEN
+    s = run_with(tmp_path)
+    s.until_taken = True
+    s.start_item(0.0, {})
+    s.on_events([(5.0, "PICK", 51, "text + REF", None)])
+    assert s.check(90.0, "FOUND", 51) == PICK_NOT_TAKEN
+    row = s.finish_item(90.0, PICK_NOT_TAKEN, {}, 20)
+    assert row["detik"] == "5.0" and row["kotak"] == 51 and row["bukti"] == "text + REF"
+    s.start_item(100.0, {})
+    assert s.check(190.0, "SEARCHING", None) == "TIMEOUT"          # never found: still a plain timeout

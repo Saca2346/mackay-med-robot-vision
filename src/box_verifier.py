@@ -52,16 +52,23 @@ _REQ_DATE = re.compile(r"\b(20\d\d)[-/.](\d{1,2})[-/.](\d{1,2})\b")   # date in 
 
 
 PRODUCTS = ["angiolite", "xperience pro", "essential pro", "accuforce", "ultimaster nagomi", "ryurei",
-            "conqueror nc pro", "nc emerge", "agent", "sapphire", "scoreflex", "permanent sled bag"]
+            "conqueror nc pro", "nc emerge", "agent", "sapphire", "scoreflex", "permanent sled bag",
+            "chroma", "sequent please neo"]       # 15-10: brands of the mentor's task photos (13-10)
 BRANDS = {"ivascular": {"angiolite", "xperience pro", "essential pro"},
           "terumo": {"accuforce", "ultimaster nagomi", "ryurei"},
           "boston scientific": {"agent", "nc emerge", "permanent sled bag"},
           "orbusneich": {"sapphire", "scoreflex"},
-          "apt medical": {"conqueror nc pro"}}
+          "apt medical": {"conqueror nc pro"},
+          "biosensors": {"chroma"},
+          "b braun": {"sequent please neo"}}
 NO_SIZE = {"permanent sled bag"}                 # barang tanpa diameter / panjang
+# "please" is a filler word of requests, so "SeQuent Please NEO" arrives as "sequent neo"; "Braun, DCB, 2.75mm, 30mm"
+# is how the mentor asks for it (DCB = drug coated balloon). A bare "dcb" is NOT an alias: Agent is a DCB as well.
 ALIASES = {"nagomi": "ultimaster nagomi", "ultimaster": "ultimaster nagomi", "xperience": "xperience pro",
            "essential": "essential pro", "sled bag": "permanent sled bag", "sled": "permanent sled bag",
-           "conqueror": "conqueror nc pro", "emerge": "nc emerge"}
+           "conqueror": "conqueror nc pro", "emerge": "nc emerge",
+           "sequent neo": "sequent please neo", "sequent": "sequent please neo", "braun dcb": "sequent please neo",
+           "b braun dcb": "sequent please neo"}
 _FILLER = {"pilih", "ambil", "ambilkan", "cari", "carikan", "tolong", "minta", "saya", "yang", "dengan", "dan", "kotak",
            "box", "stent", "balon", "balloon", "kateter", "catheter", "ukuran", "size", "mm", "milimeter", "merek",
            "merk", "brand", "produk", "untuk", "the", "please", "pick", "select", "get", "a", "of",
@@ -205,6 +212,28 @@ _DATE = re.compile(r"\b\d{4}([-/.])\d{1,2}\1\d{1,2}\b|\b\d{1,2}([-/.])\d{1,2}\2\
                    r"|\b(?:19|20)\d{2}-\d{1,2}\b")
 _NUM = re.compile(r"\d+(?:[.,]\d+)?")
 _BAD_UNIT = re.compile(r"(atm|bar|kpa|psi|cm|fr|in|inch|\")", re.I)
+_SLASH_FRAGMENT = re.compile(r"(?<![A-Za-z0-9])\d+(?:/[A-Za-z0-9]+)+(?![A-Za-z0-9])")
+
+
+def _size_token_text(text: str) -> str:
+    """Mask date/code fragments, retaining genuine numeric slash sizes and units.
+
+    OCR can turn an upside-down LOT/date into '20/0L92'. Its leading 20 is
+    neither a printed length nor a contradiction. Keep the original token in
+    Identity.text and exports; only numeric extraction sees this mask.
+    """
+    def slash(match):
+        value = match.group(0)
+        if not re.fullmatch(r"\d+(?:/\d+)+(?:mm|rnm|rn|nm)?", value, re.I):
+            return " "
+        parts = re.sub(r"(?:mm|rnm|rn|nm)$", "", value, flags=re.I).split("/")
+        # A long or zero-prefixed segment is a code/date fragment, not a size.
+        # The same LOT fragment can be read '20/0L92' or '20/0192'. Do not keep
+        # the leading 20 when the rest already fails numeric-size parsing.
+        if any(len(p) >= 4 or (len(p) > 1 and p.startswith("0")) for p in parts):
+            return " "
+        return value
+    return _SLASH_FRAGMENT.sub(slash, _DATE.sub(" ", text))
 
 
 def _find_product(tokens: list[OcrToken], catalog: list[str], min_conf: float):
@@ -266,20 +295,25 @@ def _diameter_symbols(tokens: list[OcrToken]) -> list[OcrToken]:
     return out
 
 
+QUARTER_DECIMALS = {"00", "25", "50", "75"}       # stent / balloon diameters are multiples of 0.25 mm
+
+
 def _merge_split_decimals(tokens: list[OcrToken], min_conf: float) -> list[OcrToken]:
     """OCR kadang kehilangan titik desimal: "2" "75" "mm" dari "2.75 mm". Pola satu digit + dua digit
     (+ "mm") dijadikan SATU token "2.75" yang sengaja dibuat RAGU (conf di bawah min_conf): tidak dihitung
-    sebagai bukti cocok, tapi juga tidak lagi menghasilkan bacaan salah "diameter 2 / panjang 75"."""
+    sebagai bukti cocok, tapi juga tidak lagi menghasilkan bacaan salah "diameter 2 / panjang 75".
+    Only a decimal part a diameter can have (.00 / .25 / .50 / .75) is merged: "4" "19" is 4 x 19, never 4.19
+    (20-10, Angiolite 4 x 19 on the webcam: read "4 19" for 6 s and stayed a candidate)."""
     out, i = [], 0
     while i < len(tokens):
         t = tokens[i]
         one = re.fullmatch(r"(\d)\s+(\d{2})\s*(mm)?", t.text.strip())
-        if one:
+        if one and one.group(2) in QUARTER_DECIMALS:
             out.append(OcrToken(f"{one.group(1)}.{one.group(2)}", min(t.conf, min_conf) * 0.5))
             i += 1
             continue
         if (i + 1 < len(tokens) and re.fullmatch(r"\d", t.text.strip()) and re.fullmatch(r"\d{2}", tokens[i + 1].text.strip())
-                and (i + 2 >= len(tokens) or tokens[i + 2].text.strip().lower().startswith("mm"))):
+                and tokens[i + 1].text.strip() in QUARTER_DECIMALS and (i + 2 >= len(tokens) or tokens[i + 2].text.strip().lower().startswith("mm"))):
             out.append(OcrToken(f"{t.text.strip()}.{tokens[i + 1].text.strip()}", min(t.conf, min_conf) * 0.5))
             i += 2
             continue
@@ -310,7 +344,7 @@ def parse_identity(tokens: list[OcrToken], catalog: list[str], min_conf: float =
     for i, t in enumerate(tokens):
         if len(re.split(r"\s*-\s*", t.text.strip())) >= 3:
             continue                                        # potongan tanggal / LOT rusak ("22-505-2022", "0-60-5702")
-        raw = _DATE.sub(" ", t.text)                        # ("2.75-20" Terumo = 2 bagian, tetap dibaca)
+        raw = _size_token_text(t.text)                     # preserve sizes such as "2.75-20" and "3/24"
         neighbours = " ".join(x.text for x in tokens[max(0, i - 1):i + 2]).lower()
         for m in _NUM.finditer(raw):
             s = m.group(0)
@@ -422,6 +456,15 @@ def decide(ident: Identity, req: Request) -> tuple[str, str]:
 
 # ------------------------------------------------------------------ verifikasi banyak sumber
 W_BARCODE, W_GTIN_TEXT, W_TEXT, W_REF = 2, 1, 1, 1
+# Owner decision 24-10 (Permanent Sled Bag, barcode OFF): for a request of a box WITHOUT a size AND with a date, the printed date
+# that equals the requested date counts as a second source next to the product name. Nothing else changes: the date still has
+# to pass the strict date gate (REQUIRED_EXPIRY / TrackState._date_gate) before MATCH, and a request without a date stays one source.
+W_DATE = 1
+
+
+def printed_date_agrees(ev, req) -> bool:
+    """A printed date read on this box equals the date of the request of a box without a size (the Sled Bag exception)."""
+    return req.product in NO_SIZE and req.expiry is not None and req.expiry in (getattr(ev, "dates", ()) or ())
 
 
 @dataclass
@@ -429,6 +472,7 @@ class Evidence:
     """Semua yang terbaca dari SATU kotak dalam satu kali baca."""
     text: Identity | None = None                        # nama produk + angka ukuran (crop size_label)
     refs: list = field(default_factory=list)            # src.box_ref.RefHit
+    ref_hints: list = field(default_factory=list)       # src.box_ref.parse_ref_hints: misread REF, supports only
     codes: list = field(default_factory=list)           # src.box_barcode.Gs1Code di dalam kotak ini
     too_far: bool = False                               # kotak terlalu kecil di gambar untuk dibaca
     support: tuple | None = None                        # (atom bukti, bertentangan?) dari support(), diisi read_evidence
@@ -490,11 +534,18 @@ def decide_multi(ev: Evidence, req: Request, catalog=None, today: dt.date | None
             contra.append(("text", W_TEXT, ", ".join(bad)))
         elif t.product_ok and (req.diameter is None or (d_ok and t.length_ok)):
             agree.append(("text", W_TEXT, t.text[:40]))
+            if t.product_ok and printed_date_agrees(ev, req):
+                agree.append(("printed date", W_DATE, req.expiry.isoformat()))
         elif t.product_ok or t.diameter_ok or t.length_ok:
             partial = True
     for r in ev.refs:
         detail = f"{r.text} = {r.product} {r.diameter:g} x {r.length:g}"
         (agree if _matches(r.product, r.diameter, r.length, req) else contra).append(("REF", W_REF, detail))
+    if not ev.refs:
+        for h in ev.ref_hints:                          # misread REF (DC-RM28.. = 25 or 20): agrees, never contradicts
+            if any(_matches(h.product, d, h.length, req) for d in h.alts):
+                agree.append(("REF", W_REF, f"{h.text} = {h.product} {'/'.join(f'{d:g}' for d in h.alts)} x {h.length:g}"))
+                break
 
     if agree and contra:
         return CONFIRM, ("contradicting evidence: " + " | ".join(f"{s} {d}" for s, _, d in agree + contra)), None
@@ -544,6 +595,8 @@ def support(ev: Evidence, req: Request, catalog=None, today: dt.date | None = No
                 atoms.add("tp")
                 if req.diameter is None:                  # produk tanpa ukuran (mis. Sled Bag): nama saja = teks lengkap
                     atoms.update(("td", "tl"))
+                    if printed_date_agrees(ev, req):
+                        atoms.add("pd")                      # owner decision 24-10: the requested printed date = second source
         if req.diameter is not None:
             for val, ok, atom, want in ((t.diameter, t.diameter_ok, "td", req.diameter),
                                         (t.length, t.length_ok, "tl", req.length)):
@@ -559,6 +612,8 @@ def support(ev: Evidence, req: Request, catalog=None, today: dt.date | None = No
             atoms.add("ref")
         else:
             contra = True
+    if not ev.refs and any(_matches(h.product, d, h.length, req) for h in ev.ref_hints for d in h.alts):
+        atoms.add("ref")
     return frozenset(atoms), contra
 
 
@@ -567,7 +622,8 @@ def combined_score(atoms) -> tuple[int, set]:
     gtins = {a[1] for a in atoms if isinstance(a, tuple)}
     score = (W_BARCODE if any(isinstance(a, tuple) and a[0] == "bc" for a in atoms) else 0) \
         + (W_GTIN_TEXT if any(isinstance(a, tuple) and a[0] == "gt" for a in atoms) else 0) \
-        + (W_REF if "ref" in atoms else 0) + (W_TEXT if {"tp", "td", "tl"} <= atoms else 0)
+        + (W_REF if "ref" in atoms else 0) + (W_TEXT if {"tp", "td", "tl"} <= atoms else 0) \
+        + (W_DATE if {"tp", "pd"} <= atoms else 0)
     return score, gtins
 
 
@@ -580,6 +636,7 @@ class TrackState:
     last_reason: str = ""
     next_ocr_frame: int = 0
     pending: bool = False              # crop box ini sedang dibaca OCR di thread latar belakang
+    inflight: int = 0                  # jumlah crop box ini yang sedang dibaca (target terkunci: sampai jumlah pembaca OCR)
     gtin: str = ""                     # dari barcode / teks GTIN terakhir (untuk FEFO dan log)
     lot: str = ""
     expiry: dt.date | None = None
@@ -596,10 +653,15 @@ class TrackState:
     evs: deque = field(default_factory=lambda: deque(maxlen=5))       # Evidence tiap bacaan, sejajar history
     dates: deque = field(default_factory=lambda: deque(maxlen=5))     # tanggal tercetak tiap bacaan (tuple, bisa kosong)
     expiry_src: str = ""               # asal `expiry`: "barcode" atau "teks" (tanggal tercetak, src/box_expiry.py)
+    look_p: float = -1.0               # product look model (src/box_product_id.py): p of the requested product, -1 = off
+    look_top: str = ""                 # ... its top class and p, for logs
+    look_other: int = 0                # ... model reads in a row sure of another product
+    look_veto: str = ""                # ... set after `veto_reads` of them: a MATCH is held as CONFIRM (never the reverse)
 
     def mark_stale(self) -> None:
         """Nomor kotak diragukan: SEMUA bacaan lama dibuang (bisa jadi milik kotak lain) dan bacaan dari crop yang
         diambil sebelum saat ini tidak dipakai (epoch naik)."""
+        self.look_other, self.look_veto = 0, ""          # the model's cross-check belonged to the doubted box too
         if self.history or self.pending:
             self.history.clear()
             self.support.clear()
@@ -628,6 +690,7 @@ class TrackState:
         rak dan mulai dari nol (+-10-20 s lagi per permintaan)."""
         evs = list(self.evs)
         self.logged, self.hint, self.hint_id, self.hint_frame = "", 0.0, "", -1000
+        self.look_p, self.look_top, self.look_other, self.look_veto = -1.0, "", 0, ""
         if not evs or len(evs) != len(self.history) or any(e is None for e in evs):
             self.history.clear()
             self.support.clear()
@@ -664,7 +727,8 @@ class TrackState:
         atoms = frozenset().union(*[a for a, _ in rows]) if rows else frozenset()
         names = [n for n, ok in (("barcode", any(isinstance(a, tuple) and a[0] == "bc" for a in atoms)),
                                  ("GTIN text", any(isinstance(a, tuple) and a[0] == "gt" for a in atoms)),
-                                 ("text", {"tp", "td", "tl"} <= atoms), ("REF", "ref" in atoms)) if ok]
+                                 ("text", {"tp", "td", "tl"} <= atoms), ("REF", "ref" in atoms),
+                                 ("printed date", {"tp", "pd"} <= atoms)) if ok]
         return " + ".join(names)
 
     def stable(self, need: int) -> str:
@@ -703,6 +767,8 @@ class TrackState:
         of THIS box must have been read and be that date. Otherwise it stays a candidate (never a PICK)."""
         if REQUIRED_EXPIRY is not None and self.expiry != REQUIRED_EXPIRY:
             return CANDIDATE
+        if self.look_veto:                 # product look model sure of another product (role A cross-check): hold
+            return CONFIRM
         return MATCH
 
 

@@ -1,0 +1,17 @@
+# 8 Nov, evening: Task 3 and the recordings again, final config of fqzh (1280 first + 544 adds, both outlines read,
+# product-name order, HEURISTIC cuDNN search) plus --webcam-ends 1 (drawing only: each end of the PICK outline on a webcam
+# still may move to the refiner's end where the band between them looks like the side it joins; webcam_ends.py).
+# Decisions must equal fqzh_t3 / fqzh_live; the outline is drawn inside the PICK time, so times are logged again.
+export OCR_ALGO=HEURISTIC
+FB="--imgsz 544x960 --workers 27 --cls-cpu 1 --proc-threads 1 --order skim --snap 1 --refine 1 --refine-device cuda --draw-imgsz 1280 --variants 1 --lazy 1 --ordered-prefetch 1 --priority 1 --refine-webcam 0"
+OZ="--views $VB --alt-views 1 --alt-lazy 1 --skim-name 1 $R"
+quiet=0
+while [ $quiet -lt 6 ]; do
+  u=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | tr -d " ")
+  if [ "$u" -lt 30 ]; then quiet=$((quiet+1)); else quiet=0; fi
+  sleep 10
+done
+echo "GPU quiet $(date +%T) load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqzw_t3 2400 task3 $FB $OZ --webcam-ends 1 --procs 20 --claude-slots 1
+run fqzw_live 3600 live $S $FB $OZ --webcam-ends 1 --procs 20
+unset OCR_ALGO

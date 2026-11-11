@@ -1,0 +1,23 @@
+# 8 Nov: the OCR processes with cuDNN HEURISTIC search (OCR_ALGO; before: RapidOCR's EXHAUSTIVE, GPU memory errors and
+# lost reads with 2 detector views). Both candidate configs, accuracy first (cells incl. FP), then timing on a quiet GPU.
+export OCR_ALGO=HEURISTIC
+FB="--imgsz 544x960 --workers 27 --cls-cpu 1 --proc-threads 1 --order skim --snap 1 --refine 1 --refine-device cuda --draw-imgsz 1280 --variants 1 --lazy 1 --ordered-prefetch 1 --priority 1 --refine-webcam 0"
+OZ="--views $VB --alt-views 1 --alt-lazy 1 --skim-name 1 $R"
+OA="--views $VA --alt-views 1 --alt-lazy 1 --skim-name 1 $R"
+run rd_zh 900 score t1_drive t2_drive t1_orig --imgsz 544x960 $F $OZ --procs 20
+run rd_zh_t3 1500 task3 --imgsz 544x960 $F $OZ --procs 20 --claude-slots 1
+quiet=0
+while [ $quiet -lt 6 ]; do
+  u=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | tr -d " ")
+  if [ "$u" -lt 30 ]; then quiet=$((quiet+1)); else quiet=0; fi
+  sleep 10
+done
+echo "GPU quiet $(date +%T) load $(cut -d' ' -f1-3 /proc/loadavg)"
+for c in z; do
+  [ $c = z ] && O="$OZ" || O="$OA"
+  run fq${c}h 2400 time t1_drive t1_orig t2_drive --runs 5 $FB $O --procs 24
+  run fq${c}h_t3 2400 task3 $FB $O --procs 20 --claude-slots 1
+  run fq${c}h_live 3600 live $S $FB $O --procs 20
+  run fq${c}h_drive 2400 drive $FB $O --drive-outlines 1 --procs 20
+done
+unset OCR_ALGO

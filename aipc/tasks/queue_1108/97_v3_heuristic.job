@@ -1,0 +1,21 @@
+# 8 Nov: the third detector view (YOLO12s trained without the 28-Sep photos, 1600 px; best size reads on Leo's photos)
+# with the speed options and cuDNN HEURISTIC in the OCR processes: accuracy, then timing on a quiet GPU.
+export OCR_ALGO=HEURISTIC
+FB="--imgsz 544x960 --workers 27 --cls-cpu 1 --proc-threads 1 --order skim --snap 1 --refine 1 --refine-device cuda --draw-imgsz 1280 --variants 1 --lazy 1 --ordered-prefetch 1 --priority 1 --refine-webcam 0"
+V3="B:1280:0+B:544x960:0+../det/runs/yolo12s-obb_1280_hold/weights/last.pt:1600:0"
+O3="--views $V3 --alt-views 1 --alt-lazy 1 --skim-name 1 $R"
+run rd_v3h 900 score t1_drive t2_drive t1_orig --imgsz 544x960 $F $O3 --procs 20
+run rd_v3h_t3 1500 task3 --imgsz 544x960 $F $O3 --procs 20 --claude-slots 1
+run dr_v3h 2400 drive --imgsz 544x960 $F $O3 --drive-outlines 1 --procs 16
+quiet=0
+while [ $quiet -lt 6 ]; do
+  u=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | tr -d " ")
+  if [ "$u" -lt 30 ]; then quiet=$((quiet+1)); else quiet=0; fi
+  sleep 10
+done
+echo "GPU quiet $(date +%T) load $(cut -d' ' -f1-3 /proc/loadavg)"
+run fqv3h 2400 time t1_drive t1_orig t2_drive --runs 5 $FB $O3 --procs 24
+run fqv3h_t3 2400 task3 $FB $O3 --procs 20 --claude-slots 1
+run fqv3h_live 3600 live $S $FB $O3 --procs 20
+run fqv3h_drive 2400 drive $FB $O3 --drive-outlines 1 --procs 20
+unset OCR_ALGO
